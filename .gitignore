@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# Переменные окружения (секреты)
+.env
+
+# База данных
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Тесты / покрытие
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Alembic — версии остаются в git, но не кэш
+alembic/__pycache__/
+
+# Docker
+*.log
