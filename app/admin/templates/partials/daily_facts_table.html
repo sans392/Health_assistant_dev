@@ -1,0 +1,64 @@
+<form hx-get="/admin/data/daily-facts-partial" hx-target="#data-content" hx-swap="innerHTML" class="filters-form">
+  <div>
+    <label>User ID</label>
+    <input type="text" name="user_id" value="{{ user_id or '' }}" placeholder="user_1">
+  </div>
+  <div>
+    <label>От даты</label>
+    <input type="date" name="date_from" value="{{ date_from or '' }}">
+  </div>
+  <div>
+    <label>До даты</label>
+    <input type="date" name="date_to" value="{{ date_to or '' }}">
+  </div>
+  <div>
+    <label>&nbsp;</label>
+    <button type="submit">Применить</button>
+  </div>
+</form>
+
+{% if facts %}
+<p style="color:var(--pico-muted-color);font-size:13px;margin-bottom:10px">Найдено: {{ total }}</p>
+<table>
+  <thead>
+    <tr>
+      <th>Дата</th>
+      <th>User</th>
+      <th>Шаги</th>
+      <th>Калории</th>
+      <th>Recovery</th>
+      <th>HRV</th>
+      <th>ЧСС покоя</th>
+      <th>SpO2</th>
+      <th>Сон (ч)</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for f in facts %}
+    <tr>
+      <td>{{ f.iso_date }}</td>
+      <td><small>{{ f.user_id[:8] }}…</small></td>
+      <td>{{ f.steps }}</td>
+      <td>{{ f.calories_kcal or '—' }}</td>
+      <td>{{ f.recovery_score or '—' }}</td>
+      <td>{{ f.hrv_rmssd_milli or '—' }}</td>
+      <td>{{ f.resting_heart_rate or '—' }}</td>
+      <td>{{ f.spo2_percentage or '—' }}</td>
+      <td>{{ "%.1f"|format(f.sleep_total_in_bed_milli / 3600000) if f.sleep_total_in_bed_milli else '—' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<div class="pagination">
+  {% if page > 1 %}
+  <a hx-get="/admin/data/daily-facts-partial?page={{ page - 1 }}" hx-target="#data-content" hx-swap="innerHTML" href="#">← Назад</a>
+  {% endif %}
+  <span style="padding:5px 8px;font-size:13px">Стр. {{ page }} / {{ pages }}</span>
+  {% if page < pages %}
+  <a hx-get="/admin/data/daily-facts-partial?page={{ page + 1 }}" hx-target="#data-content" hx-swap="innerHTML" href="#">Вперёд →</a>
+  {% endif %}
+</div>
+{% else %}
+<p style="color:var(--pico-muted-color);margin-top:16px">Данные не найдены.</p>
+{% endif %}

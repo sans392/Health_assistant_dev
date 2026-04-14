@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Dashboard</h1>
+  <p>Статус системы и статистика за сегодня</p>
+</div>
+
+<!-- System Status -->
+<div class="section-title">Статус системы</div>
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="label">Ollama</div>
+    <div class="value">
+      {% if status.ollama.available %}
+        <span class="badge badge-ok">OK</span>
+      {% else %}
+        <span class="badge badge-err">Недоступен</span>
+      {% endif %}
+    </div>
+    <div class="sub">{{ status.config.ollama_model }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">База данных</div>
+    <div class="value"><span class="badge badge-ok">OK</span></div>
+    <div class="sub">{{ "%.1f"|format(stats.db_size_bytes / 1024 / 1024) }} MB</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Uptime</div>
+    <div class="value" style="font-size:18px">{{ status.uptime }}</div>
+    <div class="sub">Health Assistant</div>
+  </div>
+</div>
+
+<!-- Today stats -->
+<div class="section-title">Статистика сегодня</div>
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="label">Запросов</div>
+    <div class="value">{{ stats.today.total_requests }}</div>
+    <div class="sub">за сегодня</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Avg Duration</div>
+    <div class="value" style="font-size:22px">{{ stats.today.avg_duration_ms }} ms</div>
+    <div class="sub">среднее время ответа</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Ошибки</div>
+    <div class="value {% if stats.today.errors_count > 0 %}{% endif %}" style="color:{% if stats.today.errors_count > 0 %}#f85149{% else %}inherit{% endif %}">{{ stats.today.errors_count }}</div>
+    <div class="sub">за сегодня</div>
+  </div>
+</div>
+
+<!-- Intent distribution -->
+{% if stats.intent_distribution %}
+<div class="section-title">Распределение по Intent (сегодня)</div>
+<table>
+  <thead><tr><th>Intent</th><th>Запросов</th></tr></thead>
+  <tbody>
+    {% for intent, count in stats.intent_distribution.items() %}
+    <tr>
+      <td><span class="badge badge-info">{{ intent }}</span></td>
+      <td><strong>{{ count }}</strong></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<!-- Recent requests -->
+<div class="section-title">Последние 10 запросов</div>
+{% if stats.recent_requests %}
+<table>
+  <thead>
+    <tr>
+      <th>Время</th>
+      <th>Запрос</th>
+      <th>Intent</th>
+      <th>Route</th>
+      <th>Duration</th>
+      <th>Ошибки</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for log in stats.recent_requests %}
+    <tr onclick="location.href='/admin/logs/{{ log.id }}'">
+      <td style="white-space:nowrap;font-size:12px">{{ log.timestamp[:16].replace('T', ' ') if log.timestamp else '—' }}</td>
+      <td class="truncate" style="max-width:300px">{{ log.raw_query }}</td>
+      <td><span class="badge badge-info">{{ log.intent or '—' }}</span></td>
+      <td><small>{{ log.route or '—' }}</small></td>
+      <td>{{ log.total_duration_ms or '—' }} ms</td>
+      <td>{% if log.has_errors %}<span class="badge badge-err">Есть</span>{% else %}—{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p style="color:var(--pico-muted-color)">Нет данных</p>
+{% endif %}
+{% endblock %}

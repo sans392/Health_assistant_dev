@@ -1,0 +1,37 @@
+{% if sessions %}
+<p style="color:var(--pico-muted-color);font-size:13px;margin-bottom:10px">Найдено: {{ total }}</p>
+<table>
+  <thead>
+    <tr>
+      <th>ID сессии</th>
+      <th>User ID</th>
+      <th>Создана</th>
+      <th>Обновлена</th>
+      <th>Сообщения</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in sessions %}
+    <tr hx-get="/admin/data/session-messages/{{ s.id }}" hx-target="#data-content" hx-swap="innerHTML">
+      <td><code style="font-size:12px">{{ s.id[:8] }}…</code></td>
+      <td><small>{{ s.user_id }}</small></td>
+      <td style="font-size:12px">{{ s.created_at[:16].replace('T', ' ') if s.created_at else '—' }}</td>
+      <td style="font-size:12px">{{ s.updated_at[:16].replace('T', ' ') if s.updated_at else '—' }}</td>
+      <td><span class="badge badge-info">Просмотреть →</span></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<div class="pagination">
+  {% if page > 1 %}
+  <a hx-get="/admin/data/sessions-partial?page={{ page - 1 }}" hx-target="#data-content" hx-swap="innerHTML" href="#">← Назад</a>
+  {% endif %}
+  <span style="padding:5px 8px;font-size:13px">Стр. {{ page }} / {{ pages }}</span>
+  {% if page < pages %}
+  <a hx-get="/admin/data/sessions-partial?page={{ page + 1 }}" hx-target="#data-content" hx-swap="innerHTML" href="#">Вперёд →</a>
+  {% endif %}
+</div>
+{% else %}
+<p style="color:var(--pico-muted-color);margin-top:16px">Сессии не найдены.</p>
+{% endif %}

@@ -4,7 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
@@ -32,9 +32,17 @@ app = FastAPI(
 # Статические файлы
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
-# Admin API (issue #12)
-from app.api.admin import router as admin_router
-app.include_router(admin_router)
+# Admin API endpoints (issue #12 + #14)
+from app.api.admin import router as admin_api_router
+app.include_router(admin_api_router)
+
+# Chat API endpoints (issue #13)
+from app.api.chat import router as chat_api_router
+app.include_router(chat_api_router)
+
+# Admin UI pages — Jinja2 (issue #14)
+from app.admin.views import router as admin_ui_router
+app.include_router(admin_ui_router)
 
 
 @app.get("/", include_in_schema=False)
@@ -57,17 +65,5 @@ async def health():
 
 @app.get("/chat", include_in_schema=False)
 async def chat_page():
-    """Тестовый чат — заглушка до реализации issue #13."""
-    from fastapi.responses import HTMLResponse
-    return HTMLResponse(
-        content="<h1>Health Assistant Chat</h1><p>Chat UI будет реализован в issue #13</p>"
-    )
-
-
-@app.get("/admin", include_in_schema=False)
-async def admin_page():
-    """Админ-панель — заглушка до реализации issue #14."""
-    from fastapi.responses import HTMLResponse
-    return HTMLResponse(
-        content="<h1>Health Assistant Admin</h1><p>Admin UI будет реализован в issue #14</p>"
-    )
+    """Тестовый чат — HTML-интерфейс (issue #13)."""
+    return FileResponse("app/static/chat.html")

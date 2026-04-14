@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}Управление{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Agent Control</h1>
+  <p>Тест LLM, конфигурация и управление данными</p>
+</div>
+
+<!-- System config -->
+<div class="section-title">Конфигурация</div>
+<table>
+  <thead><tr><th>Параметр</th><th>Значение</th></tr></thead>
+  <tbody>
+    <tr><td>Модель (OLLAMA_MODEL)</td><td><code>{{ config.ollama_model }}</code></td></tr>
+    <tr><td>Ollama host</td><td><code>{{ config.ollama_host }}</code></td></tr>
+    <tr><td>Timeout</td><td>{{ config.ollama_timeout }} сек</td></tr>
+    <tr><td>Log level</td><td><span class="badge badge-info">{{ config.log_level }}</span></td></tr>
+  </tbody>
+</table>
+
+<!-- Ollama models -->
+<div class="section-title">Модели Ollama</div>
+{% if models %}
+<table>
+  <thead><tr><th>Модель</th><th>Статус</th></tr></thead>
+  <tbody>
+    {% for m in models %}
+    <tr>
+      <td><code>{{ m }}</code></td>
+      <td>{% if config.ollama_model in m %}<span class="badge badge-ok">Используется</span>{% else %}<span class="badge badge-info">Доступна</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p style="color:var(--pico-muted-color)">Ollama недоступен или список моделей пуст.</p>
+{% endif %}
+
+<!-- Test LLM -->
+<div class="section-title">Тест LLM</div>
+<div class="llm-test">
+  <div style="display:grid;gap:12px;max-width:800px">
+    <div>
+      <label>System prompt (опционально)</label>
+      <textarea id="llm-system" rows="2" placeholder="Ты — помощник по фитнесу..."></textarea>
+    </div>
+    <div>
+      <label>Prompt *</label>
+      <textarea id="llm-prompt" rows="4" placeholder="Напишите запрос для тестирования Ollama..."></textarea>
+    </div>
+    <div>
+      <button id="llm-test-btn" onclick="testLLM()">▶ Отправить</button>
+      <span id="llm-spinner" style="display:none;margin-left:12px;color:var(--pico-muted-color)">Ожидание ответа Ollama...</span>
+    </div>
+    <div id="llm-result" style="display:none">
+      <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+        <strong>Ответ</strong>
+        <small id="llm-meta" style="color:var(--pico-muted-color)"></small>
+      </div>
+      <pre id="llm-response" class="llm-response"></pre>
+    </div>
+  </div>
+</div>
+
+<!-- Seed data -->
+<div class="section-title">Тестовые данные</div>
+<div style="max-width:600px">
+  <p style="font-size:14px;margin-bottom:12px">Пересоздать seed data (30 дней тренировок + ежедневные метрики). <strong>Внимание:</strong> существующие данные не удаляются, добавляются новые.</p>
+  <button class="secondary" id="seed-btn" onclick="runSeed()">🌱 Запустить seed_data.py</button>
+  <span id="seed-spinner" style="display:none;margin-left:12px;color:var(--pico-muted-color)">Выполняется...</span>
+  <pre id="seed-output" class="trace" style="display:none;margin-top:12px"></pre>
+</div>
+
+<script>
+async function testLLM() {
+  const prompt = document.getElementById('llm-prompt').value.trim();
+  if (!prompt) { alert('Введите prompt'); return; }
+  const system = document.getElementById('llm-system').value.trim();
+  const btn = document.getElementById('llm-test-btn');
+  const spinner = document.getElementById('llm-spinner');
+  const resultEl = document.getElementById('llm-result');
+  const responseEl = document.getElementById('llm-response');
+  const metaEl = document.getElementById('llm-meta');
+
+  btn.disabled = true;
+  spinner.style.display = 'inline';
+  resultEl.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/admin/test-llm', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Basic ' + btoa('{{ admin_user }}:{{ admin_pass }}'),
+      },
+      body: JSON.stringify({ prompt, system_prompt: system || undefined }),
+    });
+    const data = await res.json();
+    responseEl.textContent = data.response || data.error || 'Нет ответа';
+    metaEl.textContent = data.status === 'ok' ? `model: ${data.model} · ${data.duration_ms}ms · ${data.response_length} символов` : '';
+    resultEl.style.display = 'block';
+  } catch (e) {
+    responseEl.textContent = 'Ошибка: ' + e.message;
+    resultEl.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    spinner.style.display = 'none';
+  }
+}
+
+async function runSeed() {
+  const btn = document.getElementById('seed-btn');
+  const spinner = document.getElementById('seed-spinner');
+  const outputEl = document.getElementById('seed-output');
+
+  btn.disabled = true;
+  spinner.style.display = 'inline';
+  outputEl.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/admin/seed', {
+      method: 'POST',
+      headers: { 'Authorization': 'Basic ' + btoa('{{ admin_user }}:{{ admin_pass }}') },
+    });
+    const data = await res.json();
+    outputEl.textContent = data.status === 'ok'
+      ? '✓ Успешно!\n' + (data.output || '')
+      : '✗ Ошибка:\n' + (data.error || '') + '\n' + (data.output || '');
+    outputEl.style.display = 'block';
+  } catch (e) {
+    outputEl.textContent = 'Ошибка: ' + e.message;
+    outputEl.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    spinner.style.display = 'none';
+  }
+}
+</script>
+{% endblock %}

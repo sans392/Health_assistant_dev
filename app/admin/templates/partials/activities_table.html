@@ -1,0 +1,70 @@
+<form hx-get="/admin/data/activities-partial" hx-target="#data-content" hx-swap="innerHTML" class="filters-form">
+  <div>
+    <label>User ID</label>
+    <input type="text" name="user_id" value="{{ user_id or '' }}" placeholder="user_1">
+  </div>
+  <div>
+    <label>Sport type</label>
+    <select name="sport_type">
+      <option value="">Все</option>
+      {% for st in sport_types %}
+      <option value="{{ st }}" {% if sport_type == st %}selected{% endif %}>{{ st }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>От даты</label>
+    <input type="date" name="date_from" value="{{ date_from or '' }}">
+  </div>
+  <div>
+    <label>До даты</label>
+    <input type="date" name="date_to" value="{{ date_to or '' }}">
+  </div>
+  <div>
+    <label>&nbsp;</label>
+    <button type="submit">Применить</button>
+  </div>
+</form>
+
+{% if activities %}
+<p style="color:var(--pico-muted-color);font-size:13px;margin-bottom:10px">Найдено: {{ total }} тренировок</p>
+<table>
+  <thead>
+    <tr>
+      <th>Дата</th>
+      <th>Название</th>
+      <th>Sport</th>
+      <th>Длительность</th>
+      <th>Дистанция</th>
+      <th>Калории</th>
+      <th>ЧСС avg</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for a in activities %}
+    <tr>
+      <td style="white-space:nowrap;font-size:12px">{{ a.start_time[:10] if a.start_time else '—' }}</td>
+      <td class="truncate">{{ a.title }}</td>
+      <td><span class="badge badge-info">{{ a.sport_type }}</span></td>
+      <td>{{ (a.duration_seconds // 60) }} мин</td>
+      <td>{{ "%.1f"|format(a.distance_meters / 1000) if a.distance_meters else '—' }} км</td>
+      <td>{{ a.calories }} ккал</td>
+      <td>{{ a.avg_heart_rate or '—' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<!-- Pagination -->
+<div class="pagination">
+  {% if page > 1 %}
+  <a hx-get="/admin/data/activities-partial?page={{ page - 1 }}" hx-target="#data-content" hx-swap="innerHTML" href="#">← Назад</a>
+  {% endif %}
+  <span style="padding:5px 8px;font-size:13px">Стр. {{ page }} / {{ pages }}</span>
+  {% if page < pages %}
+  <a hx-get="/admin/data/activities-partial?page={{ page + 1 }}" hx-target="#data-content" hx-swap="innerHTML" href="#">Вперёд →</a>
+  {% endif %}
+</div>
+{% else %}
+<p style="color:var(--pico-muted-color);margin-top:16px">Тренировки не найдены.</p>
+{% endif %}

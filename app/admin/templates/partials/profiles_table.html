@@ -1,0 +1,104 @@
+{% if profiles %}
+<table>
+  <thead>
+    <tr>
+      <th>User ID</th>
+      <th>Имя</th>
+      <th>Возраст</th>
+      <th>Вес</th>
+      <th>Уровень</th>
+      <th>Цели</th>
+      <th>Действия</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in profiles %}
+    <tr>
+      <td><code style="font-size:12px">{{ p.user_id[:8] }}…</code></td>
+      <td>{{ p.name }}</td>
+      <td>{{ p.age }} лет</td>
+      <td>{{ p.weight_kg }} кг</td>
+      <td><span class="badge badge-info">{{ p.experience_level }}</span></td>
+      <td><small>{{ (p.training_goals or []) | join(', ') or '—' }}</small></td>
+      <td>
+        <button class="outline secondary" style="padding:4px 10px;font-size:12px"
+          onclick="openEditProfile('{{ p.id }}', {{ p | tojson }})">Ред.</button>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<!-- Edit profile modal (inline) -->
+<dialog id="edit-profile-dialog">
+  <article>
+    <header>
+      <button aria-label="Закрыть" rel="prev" onclick="document.getElementById('edit-profile-dialog').close()"></button>
+      <h3>Редактировать профиль</h3>
+    </header>
+    <form id="edit-profile-form">
+      <input type="hidden" id="ep-id" name="id">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div><label>Имя</label><input type="text" id="ep-name" name="name"></div>
+        <div><label>Возраст</label><input type="number" id="ep-age" name="age"></div>
+        <div><label>Вес (кг)</label><input type="number" step="0.1" id="ep-weight" name="weight_kg"></div>
+        <div><label>Рост (см)</label><input type="number" step="0.1" id="ep-height" name="height_cm"></div>
+        <div>
+          <label>Уровень</label>
+          <select id="ep-level" name="experience_level">
+            <option value="beginner">beginner</option>
+            <option value="intermediate">intermediate</option>
+            <option value="advanced">advanced</option>
+          </select>
+        </div>
+        <div><label>Макс. ЧСС</label><input type="number" id="ep-max-hr" name="max_heart_rate"></div>
+      </div>
+    </form>
+    <footer>
+      <button onclick="document.getElementById('edit-profile-dialog').close()" class="secondary outline">Отмена</button>
+      <button onclick="saveProfile()">Сохранить</button>
+    </footer>
+    <div id="ep-result" style="margin-top:12px;display:none"></div>
+  </article>
+</dialog>
+
+<script>
+function openEditProfile(id, profile) {
+  document.getElementById('ep-id').value = id;
+  document.getElementById('ep-name').value = profile.name || '';
+  document.getElementById('ep-age').value = profile.age || '';
+  document.getElementById('ep-weight').value = profile.weight_kg || '';
+  document.getElementById('ep-height').value = profile.height_cm || '';
+  document.getElementById('ep-level').value = profile.experience_level || 'beginner';
+  document.getElementById('ep-max-hr').value = profile.max_heart_rate || '';
+  document.getElementById('ep-result').style.display = 'none';
+  document.getElementById('edit-profile-dialog').showModal();
+}
+async function saveProfile() {
+  const id = document.getElementById('ep-id').value;
+  const payload = {
+    name: document.getElementById('ep-name').value,
+    age: parseInt(document.getElementById('ep-age').value) || 0,
+    weight_kg: parseFloat(document.getElementById('ep-weight').value) || 0,
+    height_cm: parseFloat(document.getElementById('ep-height').value) || 0,
+    experience_level: document.getElementById('ep-level').value,
+    max_heart_rate: parseInt(document.getElementById('ep-max-hr').value) || null,
+  };
+  const res = await fetch(`/api/admin/profiles/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Basic ' + btoa('admin:admin') },
+    body: JSON.stringify(payload),
+  });
+  const resultEl = document.getElementById('ep-result');
+  resultEl.style.display = 'block';
+  if (res.ok) {
+    resultEl.innerHTML = '<span style="color:#3fb950">✓ Сохранено</span>';
+    setTimeout(() => { document.getElementById('edit-profile-dialog').close(); location.reload(); }, 1000);
+  } else {
+    resultEl.innerHTML = '<span style="color:#f85149">Ошибка сохранения</span>';
+  }
+}
+</script>
+{% else %}
+<p style="color:var(--pico-muted-color);margin-top:16px">Профили не найдены.</p>
+{% endif %}

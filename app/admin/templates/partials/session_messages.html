@@ -1,0 +1,26 @@
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+  <h3 style="margin:0">История сессии <code style="font-size:14px">{{ session_id[:8] }}…</code></h3>
+  <button class="outline secondary" hx-get="/admin/data/sessions-partial" hx-target="#data-content" hx-swap="innerHTML">← К сессиям</button>
+</div>
+
+{% if messages %}
+<div style="display:flex;flex-direction:column;gap:12px;max-width:800px">
+  {% for m in messages %}
+  <div style="display:flex;gap:10px;{% if m.role == 'user' %}flex-direction:row-reverse{% endif %}">
+    <div style="width:32px;height:32px;border-radius:50%;background:{% if m.role == 'user' %}#1e3a5f{% else %}#2d3748{% endif %};display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0">
+      {{ 'U' if m.role == 'user' else 'AI' }}
+    </div>
+    <div style="max-width:600px">
+      <div style="background:{% if m.role == 'user' %}#1e3a5f{% else %}var(--pico-card-background-color){% endif %};border:1px solid var(--pico-card-border-color);border-radius:10px;padding:10px 14px;font-size:13px;line-height:1.6">
+        {{ m.content }}
+      </div>
+      <div style="font-size:11px;color:var(--pico-muted-color);margin-top:4px;{% if m.role == 'user' %}text-align:right{% endif %}">
+        {{ m.created_at[:16].replace('T', ' ') if m.created_at else '' }}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<p style="color:var(--pico-muted-color)">В этой сессии нет сообщений.</p>
+{% endif %}

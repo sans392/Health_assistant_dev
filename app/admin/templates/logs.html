@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Логи{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Логи пайплайна</h1>
+  <p>Все запросы через PipelineOrchestrator — {{ total }} записей</p>
+</div>
+
+<!-- Filters -->
+<form method="GET" action="/admin/logs" class="filters-form">
+  <div>
+    <label>От даты</label>
+    <input type="date" name="date_from" value="{{ filters.date_from or '' }}">
+  </div>
+  <div>
+    <label>До даты</label>
+    <input type="date" name="date_to" value="{{ filters.date_to or '' }}">
+  </div>
+  <div>
+    <label>Intent</label>
+    <select name="intent">
+      <option value="">Все</option>
+      {% for i in intents %}
+      <option value="{{ i }}" {% if filters.intent == i %}selected{% endif %}>{{ i }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>Route</label>
+    <select name="route">
+      <option value="">Все</option>
+      {% for r in routes %}
+      <option value="{{ r }}" {% if filters.route == r %}selected{% endif %}>{{ r }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>Ошибки</label>
+    <select name="has_errors">
+      <option value="">Все</option>
+      <option value="true" {% if filters.has_errors == 'true' %}selected{% endif %}>Только с ошибками</option>
+      <option value="false" {% if filters.has_errors == 'false' %}selected{% endif %}>Без ошибок</option>
+    </select>
+  </div>
+  <div>
+    <label>&nbsp;</label>
+    <button type="submit">Применить</button>
+  </div>
+  <div>
+    <label>&nbsp;</label>
+    <a href="/admin/logs" role="button" class="secondary outline">Сбросить</a>
+  </div>
+</form>
+
+<!-- Table -->
+{% if logs %}
+<table>
+  <thead>
+    <tr>
+      <th>Время</th>
+      <th>Запрос</th>
+      <th>Intent</th>
+      <th>Route</th>
+      <th>Safety</th>
+      <th>Duration</th>
+      <th>Ошибки</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for log in logs %}
+    <tr onclick="location.href='/admin/logs/{{ log.id }}'">
+      <td style="white-space:nowrap;font-size:12px">{{ log.timestamp[:16].replace('T', ' ') if log.timestamp else '—' }}</td>
+      <td class="truncate">{{ log.raw_query }}</td>
+      <td><span class="badge badge-info">{{ log.intent or '—' }}</span></td>
+      <td><small>{{ log.route or '—' }}</small></td>
+      <td>
+        {% if log.safety_level == 'ok' %}<span class="badge badge-ok">ok</span>
+        {% elif log.safety_level %}<span class="badge badge-warn">{{ log.safety_level }}</span>
+        {% else %}—{% endif %}
+      </td>
+      <td>{{ log.total_duration_ms or '—' }} ms</td>
+      <td>{% if log.has_errors %}<span class="badge badge-err">!</span>{% else %}—{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<!-- Pagination -->
+<div class="pagination">
+  {% if page > 1 %}
+  <a href="?page={{ page - 1 }}{{ filter_qs }}">← Назад</a>
+  {% endif %}
+  {% for p in range(1, pages + 1) %}
+    {% if p == page %}
+    <a class="active" href="#">{{ p }}</a>
+    {% elif p == 1 or p == pages or (p >= page - 2 and p <= page + 2) %}
+    <a href="?page={{ p }}{{ filter_qs }}">{{ p }}</a>
+    {% elif p == page - 3 or p == page + 3 %}
+    <span class="ellipsis">…</span>
+    {% endif %}
+  {% endfor %}
+  {% if page < pages %}
+  <a href="?page={{ page + 1 }}{{ filter_qs }}">Вперёд →</a>
+  {% endif %}
+</div>
+
+{% else %}
+<p style="color:var(--pico-muted-color);margin-top:24px">Логи не найдены.</p>
+{% endif %}
+{% endblock %}

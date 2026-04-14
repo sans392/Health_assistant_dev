@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Данные{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Data Browser</h1>
+  <p>Тренировки, метрики, профили и чат-сессии</p>
+</div>
+
+<!-- Tabs via HTMX -->
+<div style="display:flex;gap:8px;margin-bottom:20px;border-bottom:1px solid var(--pico-card-border-color);padding-bottom:0">
+  <button class="outline secondary" hx-get="/admin/data/activities-partial" hx-target="#data-content" hx-swap="innerHTML" onclick="setTab(this,'activities')">🏃 Тренировки ({{ activities_total }})</button>
+  <button class="outline secondary" hx-get="/admin/data/daily-facts-partial" hx-target="#data-content" hx-swap="innerHTML" onclick="setTab(this,'facts')">📊 Метрики ({{ facts_total }})</button>
+  <button class="outline secondary" hx-get="/admin/data/profiles-partial" hx-target="#data-content" hx-swap="innerHTML" onclick="setTab(this,'profiles')">👤 Профили ({{ profiles_total }})</button>
+  <button class="outline secondary" hx-get="/admin/data/sessions-partial" hx-target="#data-content" hx-swap="innerHTML" onclick="setTab(this,'sessions')">💬 Сессии ({{ sessions_total }})</button>
+</div>
+
+<div id="data-content">
+  <!-- Activities (default) -->
+  {% include "partials/activities_table.html" %}
+</div>
+
+<script>
+function setTab(btn, tab) {
+  document.querySelectorAll('[onclick^="setTab"]').forEach(b => b.classList.remove('primary'));
+  btn.classList.add('primary');
+}
+// Mark first button active
+document.addEventListener('DOMContentLoaded', () => {
+  const btns = document.querySelectorAll('[onclick^="setTab"]');
+  if (btns.length) btns[0].classList.add('primary');
+});
+</script>
+{% endblock %}

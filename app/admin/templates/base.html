@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Admin{% endblock %} — Health Assistant</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <script src="https://unpkg.com/htmx.org@2.0.3/dist/htmx.min.js"></script>
+  <style>
+    :root { --pico-font-size: 15px; }
+    body { min-height: 100vh; display: flex; flex-direction: column; }
+    nav.admin-nav {
+      background: #1a1d23; border-bottom: 1px solid #30363d; padding: 0 24px;
+      display: flex; align-items: center; gap: 0; position: sticky; top: 0; z-index: 100;
+    }
+    nav.admin-nav .brand {
+      font-weight: 700; font-size: 15px; color: #e2e8f0; padding: 14px 0;
+      margin-right: 24px; text-decoration: none; display: flex; align-items: center; gap: 8px;
+    }
+    nav.admin-nav a {
+      color: #8b949e; text-decoration: none; padding: 14px 14px; font-size: 14px;
+      border-bottom: 2px solid transparent; transition: color .15s, border-color .15s;
+    }
+    nav.admin-nav a:hover, nav.admin-nav a.active { color: #e2e8f0; border-bottom-color: #3b82f6; }
+    .page-content { flex: 1; padding: 28px 32px; max-width: 1280px; margin: 0 auto; width: 100%; }
+    .page-header { margin-bottom: 24px; }
+    .page-header h1 { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
+    .page-header p { color: var(--pico-muted-color); font-size: 14px; }
+
+    /* Stat cards */
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; margin-bottom: 28px; }
+    .stat-card { background: var(--pico-card-background-color); border: 1px solid var(--pico-card-border-color); border-radius: 10px; padding: 18px 20px; }
+    .stat-card .label { font-size: 12px; color: var(--pico-muted-color); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+    .stat-card .value { font-size: 28px; font-weight: 700; }
+    .stat-card .sub { font-size: 12px; color: var(--pico-muted-color); margin-top: 4px; }
+
+    /* Status badge */
+    .badge { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 12px; font-weight: 500; }
+    .badge-ok { background: rgba(63,185,80,.15); color: #3fb950; }
+    .badge-warn { background: rgba(240,136,62,.15); color: #f0883e; }
+    .badge-err { background: rgba(248,81,73,.15); color: #f85149; }
+    .badge-info { background: rgba(59,130,246,.15); color: #3b82f6; }
+
+    /* Table improvements */
+    table { font-size: 13px; }
+    th { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--pico-muted-color); }
+    td { vertical-align: middle; }
+    .truncate { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    tr[hx-get], tr[onclick] { cursor: pointer; }
+    tr[hx-get]:hover, tr[onclick]:hover { background: rgba(255,255,255,.03); }
+
+    /* Filters form */
+    .filters-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-bottom: 20px; }
+    .filters-form > div { display: flex; flex-direction: column; gap: 4px; min-width: 140px; }
+    .filters-form label { font-size: 11px; color: var(--pico-muted-color); text-transform: uppercase; letter-spacing: .04em; }
+    .filters-form input, .filters-form select { padding: 7px 10px; font-size: 13px; margin: 0; }
+
+    /* Code / JSON */
+    pre.trace { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 14px; font-size: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; max-height: 320px; overflow-y: auto; }
+    .collapsible summary { cursor: pointer; color: var(--pico-muted-color); font-size: 13px; }
+    .collapsible summary:hover { color: var(--pico-color); }
+
+    /* Pagination */
+    .pagination { display: flex; gap: 6px; align-items: center; margin-top: 16px; }
+    .pagination a { padding: 5px 10px; border-radius: 5px; font-size: 13px; text-decoration: none; border: 1px solid var(--pico-card-border-color); }
+    .pagination a.active { background: var(--pico-primary); color: #fff; border-color: var(--pico-primary); }
+    .pagination .ellipsis { padding: 5px; color: var(--pico-muted-color); }
+
+    /* LLM test */
+    .llm-test textarea { font-family: monospace; font-size: 13px; }
+    .llm-response { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 14px; font-size: 13px; white-space: pre-wrap; }
+
+    .section-title { font-size: 14px; font-weight: 600; margin: 24px 0 12px; color: var(--pico-muted-color); text-transform: uppercase; letter-spacing: .04em; }
+
+    .htmx-indicator { display: none; }
+    .htmx-request .htmx-indicator { display: inline; }
+    .htmx-request.htmx-indicator { display: inline; }
+  </style>
+</head>
+<body>
+  <nav class="admin-nav">
+    <a href="/admin" class="brand">⚙ Health Admin</a>
+    <a href="/admin" class="{% if active_page == 'dashboard' %}active{% endif %}">Dashboard</a>
+    <a href="/admin/logs" class="{% if active_page == 'logs' %}active{% endif %}">Логи</a>
+    <a href="/admin/data" class="{% if active_page == 'data' %}active{% endif %}">Данные</a>
+    <a href="/admin/control" class="{% if active_page == 'control' %}active{% endif %}">Управление</a>
+    <div style="margin-left:auto">
+      <a href="/chat" style="font-size:13px">💬 Чат</a>
+    </div>
+  </nav>
+
+  <div class="page-content">
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>

@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Лог {{ log.id[:8] }}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Pipeline Trace</h1>
+  <p>
+    <a href="/admin/logs">← Все логи</a> &nbsp;·&nbsp;
+    ID: <code style="font-size:13px">{{ log.id }}</code>
+  </p>
+</div>
+
+<!-- Quick summary -->
+<div class="stat-grid" style="margin-bottom:20px">
+  <div class="stat-card">
+    <div class="label">Intent</div>
+    <div class="value" style="font-size:16px"><span class="badge badge-info">{{ log.intent or '—' }}</span></div>
+    <div class="sub">confidence: {{ "%.0f"|format((log.intent_confidence or 0) * 100) }}%</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Safety</div>
+    <div class="value" style="font-size:16px">
+      {% if log.safety_level == 'ok' %}<span class="badge badge-ok">ok</span>
+      {% else %}<span class="badge badge-warn">{{ log.safety_level or '—' }}</span>{% endif %}
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Route</div>
+    <div class="value" style="font-size:16px"><code>{{ log.route or '—' }}</code></div>
+    <div class="sub">fast_path: {{ 'да' if log.fast_path else 'нет' }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Duration</div>
+    <div class="value" style="font-size:22px">{{ log.total_duration_ms or '—' }} <small style="font-size:14px">ms</small></div>
+  </div>
+  <div class="stat-card">
+    <div class="label">LLM</div>
+    <div class="value" style="font-size:14px">{{ log.llm_model_used or '—' }}</div>
+    <div class="sub">вызовов: {{ log.llm_calls_count or 0 }}</div>
+  </div>
+</div>
+
+<!-- Raw query -->
+<div class="section-title">Запрос пользователя</div>
+<blockquote>{{ log.raw_query }}</blockquote>
+
+<!-- Tools & Modules -->
+<div class="section-title">Tools & Modules</div>
+<table>
+  <thead><tr><th>Тип</th><th>Список</th></tr></thead>
+  <tbody>
+    <tr><td>Tools called</td><td>{{ (log.tools_called or []) | join(', ') or '—' }}</td></tr>
+    <tr><td>Modules used</td><td>{{ (log.modules_used or []) | join(', ') or '—' }}</td></tr>
+  </tbody>
+</table>
+
+<!-- Response -->
+<div class="section-title">Ответ ассистента ({{ log.response_length or 0 }} символов)</div>
+{% if log.response_text %}
+<pre class="trace">{{ log.response_text }}</pre>
+{% else %}
+<p style="color:var(--pico-muted-color)">Нет текста ответа</p>
+{% endif %}
+
+<!-- Errors -->
+{% if log.errors %}
+<div class="section-title">Ошибки</div>
+<div style="background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.3);border-radius:8px;padding:14px">
+  {% for err in log.errors %}
+  <div style="font-size:13px;color:#f85149;font-family:monospace;margin-bottom:6px">{{ err }}</div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- Meta -->
+<details class="collapsible" style="margin-top:24px">
+  <summary>Полные метаданные (JSON)</summary>
+  <pre class="trace" style="margin-top:10px">{{ log | tojson(indent=2) }}</pre>
+</details>
+
+<div style="margin-top:24px">
+  <a href="/admin/logs" role="button" class="secondary outline">← Назад к логам</a>
+</div>
+{% endblock %}
