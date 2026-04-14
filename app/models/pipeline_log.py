@@ -1,35 +1,49 @@
-"""Модель логов пайплайна (для issue #12)."""
+"""Модель логов пайплайна (issue #12)."""
 
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, DateTime, Text, Float, JSON, Integer
+from sqlalchemy import Boolean, DateTime, Float, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
 
 
 class PipelineLog(Base):
-    """Лог одного запроса через пайплайн."""
+    """Лог одного запроса через пайплайн.
+
+    Каждый запрос получает уникальный request_id и все этапы обработки
+    логируются с привязкой к нему.
+    """
 
     __tablename__ = "pipeline_logs"
 
+    # Идентификатор запроса (request_id)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     session_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
-    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    user_query: Mapped[str] = mapped_column(Text, nullable=False)
-    # intent, safety, routing результаты
-    intent: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    safety_passed: Mapped[bool | None] = mapped_column(nullable=True)
-    route: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    # fast_path | standard | blocked
-    pipeline_path: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    # Имя LLM модели
-    llm_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    prompt_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    raw_query: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Intent и safety результаты
+    intent: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    intent_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    route: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    fast_path: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    safety_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+    # Вызванные tools и модули обработки данных
+    tools_called: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    modules_used: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    # LLM метрики
+    llm_model_used: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    llm_calls_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Производительность
+    total_duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     response_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    llm_duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
-    total_duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
-    # Дополнительные данные (tool results, etc.)
-    extra_data: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+    # Ошибки и текст ответа (для дебага в admin panel)
+    errors: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
