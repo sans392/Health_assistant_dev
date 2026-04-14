@@ -78,12 +78,6 @@ docker compose exec app python scripts/seed_data.py
 - **Pydantic:** для всех schemas на границах API
 - **Dataclasses или Pydantic:** для внутренних DTO (pipeline result, intent result)
 
-### Git
-- Ветка для MVP: `claude/health-assistant-mvp-plan-0art6`
-- **ВСЕ коммиты и push идут в эту ветку**
-- Один issue = один или несколько атомарных коммитов
-- Commit message: `[Issue #N] Короткое описание` + тело с деталями
-
 ### Именование
 - Модули pipeline: snake_case (`intent_detection.py`, `safety_check.py`)
 - Классы: PascalCase (`IntentDetector`, `SafetyChecker`)
@@ -159,5 +153,3 @@ User Query
 3. Проверить зависимости issue — готовы ли предыдущие
 4. Реализовать минимально достаточно, не добавлять лишнего
 5. Проверить: запускается ли `docker compose up`, проходят ли тесты
-6. Коммит + push в `claude/health-assistant-mvp-plan-0art6`
-7. Пометить issue как completed (комментарий или закрытие)
