@@ -15,10 +15,8 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Инициализация и завершение работы приложения."""
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
+    from app.services.logging_service import setup_json_logging
+    setup_json_logging(settings.log_level)
     logger.info("Запуск Health Assistant...")
     yield
     logger.info("Завершение работы Health Assistant.")
@@ -33,6 +31,10 @@ app = FastAPI(
 
 # Статические файлы
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+# Admin API (issue #12)
+from app.api.admin import router as admin_router
+app.include_router(admin_router)
 
 
 @app.get("/", include_in_schema=False)
