@@ -14,7 +14,7 @@ streaming в чате.
 
 **Ключевые документы:**
 - `health_assistant_architecture_v2.yaml` — полная архитектура (референс, не менять без запроса)
-- `PHASE2_PLAN.md` — план текущего этапа (issues #15–#31, порядок, зависимости)
+- `PHASE2_PLAN.md` — план текущего этапа (issues #21–#37, порядок, зависимости)
 
 MVP-план (issues #1–#14) закрыт и удалён из репозитория — историю смотри в git log.
 
@@ -176,15 +176,16 @@ User Query
 
 ## Issues и фазы
 
-Смотри `PHASE2_PLAN.md`. Issues пронумерованы **#15–#31** (MVP закрыт — #1–#14).
+Смотри `PHASE2_PLAN.md`. Issues пронумерованы **#21–#37** в GitHub (MVP закрыт — #1–#14,
+номера #15–#20 заняты прошлыми PR).
 Выполнять в порядке зависимостей, указанном в плане (секция «Оптимальный порядок исполнения»).
 
 **Старт этапа:**
-1. #15 — LLM Registry
-2. #17 — Schema v2 + migration
-3. #16 — ChromaDB + Embeddings
-4. #18 — Knowledge Base демо + retrieval
-5. #19 — Semantic Memory v1
+1. #21 — LLM Registry
+2. #23 — Schema v2 + migration
+3. #22 — ChromaDB + Embeddings
+4. #24 — Knowledge Base демо + retrieval
+5. #25 — Semantic Memory v1
 
 ...далее по плану.
 
@@ -192,7 +193,7 @@ User Query
 
 - Unit-тесты для критичных модулей: intent detection, safety, routing, data processing,
   planner (mock Ollama), template executor, rag retrieval (mock Chroma).
-- Интеграционные тесты — в #31 (Orchestrator v2): fast_path, tool_simple, template_plan,
+- Интеграционные тесты — в #37 (Orchestrator v2): fast_path, tool_simple, template_plan,
   planner loop, safety block.
 - Фреймворк: `pytest` + `pytest-asyncio`
 - Запуск: `docker compose exec app pytest`
