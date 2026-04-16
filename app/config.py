@@ -11,6 +11,17 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen2.5:7b"
     ollama_timeout: int = 60  # секунд
 
+    # LLM модели по ролям (Phase 2, Issue #21)
+    # Если не задано — fallback на ollama_model
+    llm_intent_model: str = ""   # роль intent_llm (lightweight, ~7b)
+    llm_safety_model: str = ""   # роль safety_llm (зарезервировано под v2)
+    llm_response_model: str = "" # роль response (primary, ~14b)
+    llm_planner_model: str = ""  # роль planner (heavy, ~32b)
+
+    # Эмбеддинги и ChromaDB (Phase 2, Issue #22)
+    embedding_model: str = "nomic-embed-text"
+    chroma_path: str = "/app/data/chroma"
+
     # База данных
     db_path: str = "/app/data/health_assistant.db"
 

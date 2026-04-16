@@ -6,6 +6,7 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
+      - ./data/chroma:/app/data/chroma
     env_file:
       - .env
     environment:

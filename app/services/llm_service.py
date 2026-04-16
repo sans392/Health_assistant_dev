@@ -1,7 +1,10 @@
 """Async-клиент для взаимодействия с Ollama API.
 
-В MVP используется одна модель для всех задач.
-Multi-model routing отложен на v2.
+Phase 2: мульти-модельный роутинг реализован через LLMRegistry
+(app/services/llm_registry.py). Там используй get_client(role) для новых компонентов.
+
+Backward-compat: глобальный `ollama_client` соответствует
+`llm_registry.get_client("response")` — существующий код не требует изменений.
 """
 
 import logging
