@@ -18,6 +18,21 @@ async def lifespan(app: FastAPI):
     from app.services.logging_service import setup_json_logging
     setup_json_logging(settings.log_level)
     logger.info("Запуск Health Assistant...")
+
+    # Phase 2: инициализация ChromaDB
+    from app.services.vector_store import vector_store
+    vector_store.initialize()
+
+    # Phase 2: инициализация LLM Registry (проверка моделей + загрузка из БД)
+    from app.services.llm_registry import llm_registry
+    from app.db import AsyncSessionLocal
+    try:
+        async with AsyncSessionLocal() as db:
+            await llm_registry.load_from_db(db)
+    except Exception as exc:
+        logger.warning("LLM Registry: не удалось загрузить конфиги из БД: %s", exc)
+    await llm_registry.initialize()
+
     yield
     logger.info("Завершение работы Health Assistant.")
 
@@ -53,13 +68,23 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Healthcheck endpoint."""
+    """Healthcheck endpoint.
+
+    Проверяет доступность Ollama (включая модели по ролям) и ChromaDB.
+    """
     from app.services.llm_service import ollama_client
+    from app.services.llm_registry import llm_registry
+    from app.services.vector_store import vector_store
 
     ollama_status = await ollama_client.health_check()
+    roles_status = await llm_registry.health_check()
+    chroma_status = vector_store.health_check()
+
     return {
         "status": "ok",
         "ollama": ollama_status,
+        "llm_roles": roles_status,
+        "chromadb": chroma_status,
     }
 
 

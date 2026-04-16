@@ -47,3 +47,11 @@ class PipelineLog(Base):
     # Ошибки и текст ответа (для дебага в admin panel)
     errors: Mapped[list | None] = mapped_column(JSON, nullable=True)
     response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Phase 2 (Issue #23): observability
+    # Список id RAG-чанков, использованных в запросе
+    rag_chunks_used: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Хронология стадий: [{stage, start_ms, duration_ms}, ...]
+    stage_trace: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Количество LLM-вызовов по ролям: {role: count}
+    llm_role_usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)

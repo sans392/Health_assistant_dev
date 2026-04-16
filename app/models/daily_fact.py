@@ -28,3 +28,11 @@ class DailyFact(Base):
     water_liters: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Маппинг метрика → источник данных
     sources_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    # Phase 2 (Issue #23): расчётные метрики
+    # Расчётный recovery score (вычислен из HRV/RHR/sleep, в отличие от нативного Whoop)
+    recovery_score_calculated: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Нагрузка на организм (аналог Whoop Strain, Phase 2 Data Processing)
+    strain_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Флаги аномалий дня (например ["hrv_drop", "rhr_spike"])
+    anomaly_flags: Mapped[list] = mapped_column(JSON, nullable=False, default=list)

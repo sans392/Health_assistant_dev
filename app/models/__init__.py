@@ -5,6 +5,9 @@ from app.models.activity import Activity
 from app.models.daily_fact import DailyFact
 from app.models.chat import ChatSession, ChatMessage
 from app.models.pipeline_log import PipelineLog
+from app.models.llm_role_config import LLMRoleConfig
+from app.models.llm_call import LLMCall
+from app.models.rag_chunk import RAGChunk
 
 __all__ = [
     "UserProfile",
@@ -13,4 +16,7 @@ __all__ = [
     "ChatSession",
     "ChatMessage",
     "PipelineLog",
+    "LLMRoleConfig",
+    "LLMCall",
+    "RAGChunk",
 ]
