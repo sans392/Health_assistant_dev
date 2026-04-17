@@ -1,65 +1,65 @@
-"""Генератор ответов через LLM (Response Generator).
+"""Response Generator v2 (Phase 2, Issue #30).
 
-Формирует промпт из контекста и structured_result, вызывает Ollama,
-возвращает текстовый ответ.
+Обновления:
+- Выбор модели по intent через LLM Registry (response / planner роль)
+- RAG-чанки из structured_result добавляются в промпт
+- Semantic context из enriched_query.semantic_context
+- Token streaming через Ollama API (on_token callback)
+- Улучшенные правила промпта: данные с числами, anomaly_flags, честный fallback
 """
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.pipeline.context_builder import EnrichedQuery
-from app.services.llm_service import LLMResponse, ollama_client
+from app.services.llm_registry import llm_registry
+from app.services.llm_service import LLMResponse
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Системный промпт (из архитектуры)
-# ---------------------------------------------------------------------------
+_TIMEOUT_FALLBACK = "Извини, сейчас я не могу сгенерировать ответ. Попробуй ещё раз."
 
-_SYSTEM_PROMPT_TEMPLATE = """Ты — фитнес-ассистент. Отвечай на русском.
+_SAFETY_WARNING_SUFFIX = (
+    "\n\n---\n> ⚠️ Если симптомы сохраняются, рекомендую проконсультироваться с врачом."
+)
+
+_PLANNER_ROLE_INTENTS = {"plan_request"}
+_RAG_INTENTS = {"plan_request", "health_concern", "data_analysis"}
+
+_SYSTEM_PROMPT_TEMPLATE = """Ты — дружелюбный фитнес-ассистент. Отвечай на русском.
 
 ## Профиль пользователя
 {user_profile}
 
-## Контекст разговора
+## История разговора
 {conversation_history}
 
-## Результаты анализа
+{rag_block}{semantic_block}## Результаты анализа
 {structured_result}
 
 ## Запрос пользователя
 {normalized_text}
 
-Правила:
-- Используй ТОЛЬКО данные из "Результаты анализа"
-- Не придумывай числа
-- Если данных нет — скажи об этом
-- Будь конкретен: цифры, даты, проценты
-- Форматируй ответ в Markdown: summary → details → recommendations
+Правила ответа:
+- Используй ТОЛЬКО данные из «Результаты анализа»
+- Упоминай anomaly_flags если они есть (например: «твоё HRV сегодня ниже обычного»)
+- Ссылайся на конкретные числа и даты
+- Если данных нет — скажи об этом честно: «недостаточно данных»
+- Тон: дружелюбный тренер, не врач
+- Форматируй в Markdown: краткий вывод → подробности → рекомендации
 - Максимум ~500 токенов"""
 
-# Суффикс для medium_priority safety
-_SAFETY_WARNING_SUFFIX = (
-    "\n\n---\n> ⚠️ Если симптомы сохраняются, рекомендую проконсультироваться с врачом."
-)
-
-# Системный промпт для fast_path (без structured_result)
-_FAST_PATH_SYSTEM = """Ты — фитнес-ассистент. Отвечай на русском.
+_FAST_PATH_SYSTEM = """Ты — дружелюбный фитнес-ассистент. Отвечай на русском.
 Будь конкретен и краток. Максимум ~200 токенов."""
 
 
-@dataclass
-class GeneratorResult:
-    """Результат генерации ответа."""
-
-    content: str                # Текст ответа (Markdown)
-    llm_response: LLMResponse   # Метрики вызова LLM
-    route: str                  # Маршрут, для которого генерировался ответ
+def _select_role(intent: str) -> str:
+    return "planner" if intent in _PLANNER_ROLE_INTENTS else "response"
 
 
 def _format_user_profile(profile: dict | None) -> str:
-    """Форматировать профиль пользователя для промпта."""
     if not profile:
         return "Профиль не задан."
     lines = [
@@ -78,19 +78,17 @@ def _format_user_profile(profile: dict | None) -> str:
 
 
 def _format_conversation_history(history: list[dict]) -> str:
-    """Форматировать историю разговора для промпта."""
     if not history:
         return "История пуста."
     lines = []
-    for msg in history[-5:]:  # только последние 5 сообщений
+    for msg in history[-5:]:
         role = "Пользователь" if msg.get("role") == "user" else "Ассистент"
-        content = msg.get("content", "")[:200]  # ограничение длины
+        content = msg.get("content", "")[:200]
         lines.append(f"{role}: {content}")
     return "\n".join(lines)
 
 
 def _format_structured_result(structured_result: dict | None) -> str:
-    """Форматировать структурированные результаты для промпта."""
     if not structured_result:
         return "Данных нет."
     try:
@@ -99,11 +97,53 @@ def _format_structured_result(structured_result: dict | None) -> str:
         return str(structured_result)
 
 
+def _extract_rag_chunks(structured_result: dict | None) -> list[dict]:
+    """Извлечь RAG-чанки из structured_result (от template_executor или tool_executor)."""
+    if not structured_result:
+        return []
+    chunks: list[dict] = []
+    for key, val in structured_result.items():
+        if "rag_retrieve" in key and isinstance(val, list):
+            chunks.extend(val)
+    return chunks
+
+
+def _format_rag_block(rag_chunks: list[dict]) -> str:
+    if not rag_chunks:
+        return ""
+    lines = ["## Релевантные знания (RAG):"]
+    for chunk in rag_chunks[:6]:
+        if isinstance(chunk, dict):
+            category = chunk.get("category", "")
+            confidence = chunk.get("confidence", "")
+            text = (chunk.get("text") or "")[:250]
+            lines.append(f"- [{category}, {confidence}] {text}")
+    return "\n".join(lines) + "\n\n"
+
+
+def _format_semantic_block(semantic_context: list) -> str:
+    if not semantic_context:
+        return ""
+    lines = ["## Релевантные прошлые ответы:"]
+    for item in semantic_context[:3]:
+        text = (item.get("text") or "")[:200]
+        lines.append(f"- {text}")
+    return "\n".join(lines) + "\n\n"
+
+
+@dataclass
+class GeneratorResult:
+    """Результат генерации ответа."""
+
+    content: str
+    llm_response: LLMResponse
+    route: str
+
+
 class ResponseGenerator:
     """Генерирует человекочитаемый ответ через Ollama LLM.
 
-    Не выполняет вычислений — только форматирует готовые данные и
-    вызывает LLM для генерации ответа.
+    v2: role-based LLM, RAG-контекст, semantic context, token streaming.
     """
 
     async def generate(
@@ -112,34 +152,41 @@ class ResponseGenerator:
         route: str,
         structured_result: dict | None = None,
         safety_level: str = "ok",
+        intent: str = "general_chat",
+        on_token: Callable[[str], None] | None = None,
     ) -> GeneratorResult:
         """Сгенерировать ответ на запрос пользователя.
 
         Args:
             enriched_query: Обогащённый запрос с профилем и историей.
-            route: Маршрут из RouteResult (fast_direct_answer, tool_simple и т.д.).
-            structured_result: Агрегированные данные из Tool Executor / Data Processing.
-            safety_level: Уровень безопасности из SafetyResult (ok / medium_priority).
+            route: Маршрут из RouteResult.
+            structured_result: Данные из Tool/Template/Planner executor.
+            safety_level: Уровень безопасности (ok / medium_priority).
+            intent: Намерение пользователя (для выбора роли LLM).
+            on_token: Callback для каждого токена стрима (опционально).
 
         Returns:
             GeneratorResult с текстом ответа и метриками LLM.
         """
         if route == "fast_direct_answer":
-            return await self._generate_fast_path(enriched_query, safety_level)
+            return await self._generate_fast_path(enriched_query, safety_level, on_token)
 
         return await self._generate_standard(
             enriched_query=enriched_query,
             route=route,
             structured_result=structured_result,
             safety_level=safety_level,
+            intent=intent,
+            on_token=on_token,
         )
 
     async def _generate_fast_path(
         self,
         enriched_query: EnrichedQuery,
         safety_level: str,
+        on_token: Callable[[str], None] | None,
     ) -> GeneratorResult:
-        """Fast path: ответ без structured_result (direct_question, general_chat)."""
+        """Fast path: короткий ответ без данных (greeting, off_topic, general_question)."""
         profile_str = _format_user_profile(enriched_query.user_profile)
         history_str = _format_conversation_history(enriched_query.conversation_history)
 
@@ -149,11 +196,14 @@ class ResponseGenerator:
             f"Запрос: {enriched_query.normalized_text}"
         )
 
-        llm_response = await ollama_client.generate(
+        llm_client = llm_registry.get_client("response")
+        llm_response = await self._call_llm(
+            llm_client=llm_client,
             prompt=prompt,
             system_prompt=_FAST_PATH_SYSTEM,
             temperature=0.7,
             max_tokens=300,
+            on_token=on_token,
         )
 
         content = llm_response.content
@@ -161,18 +211,11 @@ class ResponseGenerator:
             content += _SAFETY_WARNING_SUFFIX
 
         logger.info(
-            "ResponseGenerator fast_path: route=fast_direct_answer "
-            "prompt_len=%d response_len=%d duration_ms=%.1f",
-            llm_response.prompt_length,
-            llm_response.response_length,
-            llm_response.duration_ms,
+            "ResponseGenerator fast_path: prompt_len=%d response_len=%d duration_ms=%.1f",
+            llm_response.prompt_length, llm_response.response_length, llm_response.duration_ms,
         )
 
-        return GeneratorResult(
-            content=content,
-            llm_response=llm_response,
-            route="fast_direct_answer",
-        )
+        return GeneratorResult(content=content, llm_response=llm_response, route="fast_direct_answer")
 
     async def _generate_standard(
         self,
@@ -180,25 +223,42 @@ class ResponseGenerator:
         route: str,
         structured_result: dict | None,
         safety_level: str,
+        intent: str,
+        on_token: Callable[[str], None] | None,
     ) -> GeneratorResult:
-        """Standard path: ответ с structured_result из БД/модулей."""
+        """Standard path: ответ с данными из tool/template/planner executor."""
         profile_str = _format_user_profile(enriched_query.user_profile)
         history_str = _format_conversation_history(enriched_query.conversation_history)
         result_str = _format_structured_result(structured_result)
 
+        rag_block = ""
+        if intent in _RAG_INTENTS:
+            rag_chunks = _extract_rag_chunks(structured_result)
+            if enriched_query.knowledge_context:
+                rag_chunks = list(enriched_query.knowledge_context) + rag_chunks
+            rag_block = _format_rag_block(rag_chunks)
+
+        semantic_block = _format_semantic_block(enriched_query.semantic_context)
+
         system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(
             user_profile=profile_str,
             conversation_history=history_str,
+            rag_block=rag_block,
+            semantic_block=semantic_block,
             structured_result=result_str,
             normalized_text=enriched_query.normalized_text,
         )
 
-        # Для стандартного пути используем только запрос как prompt
-        llm_response = await ollama_client.generate(
+        role = _select_role(intent)
+        llm_client = llm_registry.get_client(role)
+
+        llm_response = await self._call_llm(
+            llm_client=llm_client,
             prompt=enriched_query.normalized_text,
             system_prompt=system_prompt,
-            temperature=0.5,   # менее творческий — данные точные
+            temperature=0.5,
             max_tokens=600,
+            on_token=on_token,
         )
 
         content = llm_response.content
@@ -206,16 +266,43 @@ class ResponseGenerator:
             content += _SAFETY_WARNING_SUFFIX
 
         logger.info(
-            "ResponseGenerator standard: route=%s "
+            "ResponseGenerator standard: route=%s role=%s intent=%s "
             "prompt_len=%d response_len=%d duration_ms=%.1f",
-            route,
-            llm_response.prompt_length,
-            llm_response.response_length,
-            llm_response.duration_ms,
+            route, role, intent,
+            llm_response.prompt_length, llm_response.response_length, llm_response.duration_ms,
         )
 
-        return GeneratorResult(
-            content=content,
-            llm_response=llm_response,
-            route=route,
-        )
+        return GeneratorResult(content=content, llm_response=llm_response, route=route)
+
+    async def _call_llm(
+        self,
+        llm_client: object,
+        prompt: str,
+        system_prompt: str,
+        temperature: float,
+        max_tokens: int,
+        on_token: Callable[[str], None] | None,
+    ) -> LLMResponse:
+        """Вызвать LLM (streaming или non-streaming), с fallback при ошибке."""
+        try:
+            if on_token is not None:
+                return await llm_client.generate_stream(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    on_token=on_token,
+                )
+            else:
+                return await llm_client.generate(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+        except Exception as exc:
+            logger.error("ResponseGenerator: LLM ошибка: %s", exc)
+            return LLMResponse(
+                content=_TIMEOUT_FALLBACK, model="fallback",
+                prompt_length=0, response_length=len(_TIMEOUT_FALLBACK), duration_ms=0.0,
+            )

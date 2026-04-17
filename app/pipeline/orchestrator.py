@@ -1,11 +1,24 @@
-"""Pipeline Orchestrator — сборка всех стадий пайплайна.
+"""Pipeline Orchestrator — сборка всех стадий пайплайна (Phase 2).
 
-Связывает Context Builder, Intent Detection, Safety Check, Router,
-Tool Executor, Data Processing и Response Generator в единый поток.
+Flow:
+  User Query
+    → Context Builder         — обогащение запроса
+    → Intent Detection        — rule-based + LLM fallback
+    → Safety Check            — pattern-based
+    → Router                  — 4 маршрута
+    ↓
+    [blocked]       → return redirect_message
+    [fast_direct]   → Response Generator → return
+    [tool_simple]   → Tool Executor → [Data Processing] → Response Generator → return
+    [template_plan] → Template Plan Executor → Response Generator → return
+    [planner]       → Planner Agent → Response Generator → return
+    ↓
+    Memory Update (async)
 """
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from sqlalchemy import func, select
@@ -15,9 +28,11 @@ from app.models.chat import ChatMessage, ChatSession
 from app.pipeline.context_builder import ContextBuilder
 from app.pipeline.intent_detection import IntentDetector
 from app.pipeline.memory_update import memory_updater
+from app.pipeline.planner import planner_agent
 from app.pipeline.response_generator import ResponseGenerator
 from app.pipeline.router import Router
 from app.pipeline.safety_check import SafetyChecker
+from app.pipeline.template_plan_executor import template_plan_executor
 from app.pipeline.tool_executor import ToolExecutor
 from app.services.data_processing.activity_summary import compute_activity_summary
 from app.services.data_processing.training_load import compute_training_load
@@ -47,34 +62,16 @@ class PipelineResult:
     duration_ms: int
     errors: list[str]
 
-    # Дополнительные метаданные для логирования (issue #12)
     raw_query: str = ""
     intent_confidence: float = 0.0
     safety_level: str = "ok"
     llm_model: str = ""
     llm_calls_count: int = 0
+    template_id: str | None = None
 
 
 class PipelineOrchestrator:
-    """Оркестратор пайплайна — связывает все модули в единый поток обработки.
-
-    Полный flow:
-        User Query
-          → Context Builder         — обогащение запроса
-          → Intent Detection        — определение намерения
-          → Safety Check            — проверка безопасности
-          → Router                  — выбор маршрута
-          ↓
-          [blocked] → return redirect_message
-          ↓
-          [fast_path] → Response Generator → return
-          ↓
-          [standard]
-            → Tool Executor         — получение данных из БД
-            → Data Processing       — вычисления
-            → Response Generator    — генерация ответа LLM
-            → return
-    """
+    """Оркестратор пайплайна — связывает все модули в единый поток обработки."""
 
     def __init__(self) -> None:
         self._context_builder = ContextBuilder()
@@ -90,6 +87,7 @@ class PipelineOrchestrator:
         session_id: str,
         raw_query: str,
         db: AsyncSession,
+        on_token: Callable[[str], None] | None = None,
     ) -> PipelineResult:
         """Обработать запрос пользователя через полный пайплайн.
 
@@ -98,6 +96,7 @@ class PipelineOrchestrator:
             session_id: Идентификатор сессии чата.
             raw_query: Текст запроса пользователя.
             db: Асинхронная сессия SQLAlchemy.
+            on_token: Callback для каждого токена при streaming (опционально).
 
         Returns:
             PipelineResult со всеми метаданными и текстом ответа.
@@ -113,6 +112,7 @@ class PipelineOrchestrator:
                 db=db,
                 start_ms=start_ms,
                 errors=errors,
+                on_token=on_token,
             )
         except Exception as exc:
             logger.error(
@@ -147,55 +147,42 @@ class PipelineOrchestrator:
         db: AsyncSession,
         start_ms: float,
         errors: list[str],
+        on_token: Callable[[str], None] | None,
     ) -> PipelineResult:
-        """Внутренняя реализация пайплайна без верхнеуровневого try/except."""
+        """Внутренняя реализация пайплайна."""
 
-        # 1. Context Builder — обогащение запроса контекстом
+        # 1. Context Builder
         enriched = await self._context_builder.build(
-            query=raw_query,
-            session_id=session_id,
-            user_id=user_id,
-            db=db,
+            query=raw_query, session_id=session_id, user_id=user_id, db=db,
         )
 
-        # 2. Intent Detection — stage 1 (rule-based) + stage 2 LLM при низкой уверенности
+        # 2. Intent Detection
         history = [
             {"role": msg.role, "content": msg.content}
             for msg in enriched.conversation_history[-3:]
         ] if enriched.conversation_history else []
         intent_result = await self._intent_detector.detect(
-            raw_query,
-            llm_registry=llm_registry,
-            history=history,
+            raw_query, llm_registry=llm_registry, history=history,
         )
 
-        # 3. Safety Check — проверяем безопасность (синхронный)
+        # 3. Safety Check
         safety_result = self._safety_checker.check(raw_query)
 
-        # 4. Router — выбираем маршрут
+        # 4. Router
         route_result = self._router.route(intent_result, safety_result)
 
         logger.info(
-            "Orchestrator: intent=%s (%.2f) safety=%s route=%s fast_path=%s blocked=%s | user=%s",
-            intent_result.intent,
-            intent_result.confidence,
-            safety_result.safety_level,
-            route_result.route,
-            route_result.fast_path,
-            route_result.blocked,
+            "Orchestrator: intent=%s (%.2f) safety=%s route=%s template=%s fast=%s blocked=%s | user=%s",
+            intent_result.intent, intent_result.confidence,
+            safety_result.safety_level, route_result.route,
+            route_result.template_id, route_result.fast_path, route_result.blocked,
             user_id,
         )
 
-        # 5. [Blocked] — safety заблокировал запрос
+        # 5. Blocked
         if route_result.blocked:
             response_text = route_result.block_message or _FALLBACK_RESPONSE
-            await self._save_messages(
-                session_id=session_id,
-                user_id=user_id,
-                raw_query=raw_query,
-                response_text=response_text,
-                db=db,
-            )
+            await self._save_messages(session_id, user_id, raw_query, response_text, db)
             duration = int(time.monotonic() * 1000 - start_ms)
             return PipelineResult(
                 response_text=response_text,
@@ -217,7 +204,7 @@ class PipelineOrchestrator:
         llm_model_used = ollama_client.model
         llm_calls_count = 0
 
-        # 6. Fast path — без Tool Executor и Data Processing
+        # 6. fast_direct_answer
         if route_result.fast_path:
             try:
                 generator_result = await self._response_generator.generate(
@@ -225,6 +212,8 @@ class PipelineOrchestrator:
                     route=route_result.route,
                     structured_result=None,
                     safety_level=safety_result.safety_level,
+                    intent=intent_result.intent,
+                    on_token=on_token,
                 )
                 llm_calls_count = 1
                 response_text = generator_result.content
@@ -234,18 +223,9 @@ class PipelineOrchestrator:
                 errors.append(f"ResponseGenerator: {exc}")
                 response_text = _FALLBACK_RESPONSE
 
-            await self._save_messages(
-                session_id=session_id,
-                user_id=user_id,
-                raw_query=raw_query,
-                response_text=response_text,
-                db=db,
-            )
+            await self._save_messages(session_id, user_id, raw_query, response_text, db)
             await memory_updater.update(
-                user_id=user_id,
-                request_id=None,
-                query=raw_query,
-                response=response_text,
+                user_id=user_id, request_id=None, query=raw_query, response=response_text,
             )
             duration = int(time.monotonic() * 1000 - start_ms)
             return PipelineResult(
@@ -265,60 +245,98 @@ class PipelineOrchestrator:
                 llm_calls_count=llm_calls_count,
             )
 
-        # 7. Standard path — Tool Executor → Data Processing → Response Generator
         tools_called: list[str] = []
         modules_used: list[str] = []
         structured_result: dict = {}
 
-        # Tool Executor — получаем данные из БД
-        if route_result.tool_calls:
+        # 7. tool_simple
+        if route_result.route == "tool_simple":
+            if route_result.tool_calls:
+                try:
+                    tool_result = await self._tool_executor.execute(
+                        tool_calls=route_result.tool_calls,
+                        user_id=user_id,
+                        entities=intent_result.entities,
+                        db=db,
+                        query_text=raw_query,
+                    )
+                    tools_called = list(tool_result.results.keys())
+                    structured_result["tool_data"] = tool_result.all_data()
+                except Exception as exc:
+                    logger.error("Orchestrator: ToolExecutor error: %s", exc, exc_info=True)
+                    errors.append(f"ToolExecutor: {exc}")
+
+            if route_result.modules:
+                activities = (
+                    structured_result.get("tool_data", {}).get("get_activities") or []
+                )
+                processed: dict = {}
+                for module_name in route_result.modules:
+                    try:
+                        module_output = self._run_data_module(
+                            module_name=module_name,
+                            activities=activities,
+                            entities=intent_result.entities,
+                        )
+                        processed[module_name] = module_output
+                        modules_used.append(module_name)
+                    except Exception as exc:
+                        logger.error(
+                            "Orchestrator: DataProcessing[%s] error: %s", module_name, exc,
+                            exc_info=True,
+                        )
+                        errors.append(f"DataProcessing[{module_name}]: {exc}")
+                if processed:
+                    structured_result["processed"] = processed
+
+        # 8. template_plan
+        elif route_result.route == "template_plan" and route_result.template_id:
             try:
-                tool_result = await self._tool_executor.execute(
-                    tool_calls=route_result.tool_calls,
+                template_result = await template_plan_executor.execute(
+                    template_id=route_result.template_id,
                     user_id=user_id,
+                    query_text=raw_query,
                     entities=intent_result.entities,
                     db=db,
-                    query_text=raw_query,
                 )
-                tools_called = list(tool_result.results.keys())
-                structured_result["tool_data"] = tool_result.all_data()
+                tools_called = [s.tool for s in template_result.steps if s.success]
+                structured_result = template_result.structured_data
             except Exception as exc:
-                logger.error("Orchestrator: ToolExecutor error: %s", exc, exc_info=True)
-                errors.append(f"ToolExecutor: {exc}")
+                logger.error("Orchestrator: TemplatePlanExecutor error: %s", exc, exc_info=True)
+                errors.append(f"TemplatePlanExecutor: {exc}")
 
-        # Data Processing — вычисления на полученных данных
-        if route_result.modules:
-            activities = (
-                structured_result.get("tool_data", {}).get("get_activities") or []
-            )
-            processed: dict = {}
-            for module_name in route_result.modules:
-                try:
-                    module_output = self._run_data_module(
-                        module_name=module_name,
-                        activities=activities,
-                        entities=intent_result.entities,
-                    )
-                    processed[module_name] = module_output
-                    modules_used.append(module_name)
-                except Exception as exc:
-                    logger.error(
-                        "Orchestrator: DataProcessing[%s] error: %s", module_name, exc,
-                        exc_info=True,
-                    )
-                    errors.append(f"DataProcessing[{module_name}]: {exc}")
-            if processed:
-                structured_result["processed"] = processed
+        # 9. planner
+        elif route_result.route == "planner":
+            try:
+                user_context = self._build_user_context(enriched)
+                planner_result = await planner_agent.plan(
+                    query=raw_query,
+                    user_id=user_id,
+                    user_context=user_context,
+                    entities=intent_result.entities,
+                    db=db,
+                )
+                tools_called = [tc["tool"] for tc in planner_result.tool_calls_history]
+                structured_result = planner_result.tool_results
+                llm_calls_count += planner_result.iterations
 
-        # Response Generator — генерируем ответ через LLM
+                if planner_result.timeout_hit:
+                    errors.append("PlannerAgent: timeout")
+            except Exception as exc:
+                logger.error("Orchestrator: PlannerAgent error: %s", exc, exc_info=True)
+                errors.append(f"PlannerAgent: {exc}")
+
+        # 10. Response Generator
         try:
             generator_result = await self._response_generator.generate(
                 enriched_query=enriched,
                 route=route_result.route,
                 structured_result=structured_result or None,
                 safety_level=safety_result.safety_level,
+                intent=intent_result.intent,
+                on_token=on_token,
             )
-            llm_calls_count = 1
+            llm_calls_count += 1
             response_text = generator_result.content
             llm_model_used = generator_result.llm_response.model
         except Exception as exc:
@@ -326,27 +344,17 @@ class PipelineOrchestrator:
             errors.append(f"ResponseGenerator: {exc}")
             response_text = _FALLBACK_RESPONSE
 
-        await self._save_messages(
-            session_id=session_id,
-            user_id=user_id,
-            raw_query=raw_query,
-            response_text=response_text,
-            db=db,
-        )
+        await self._save_messages(session_id, user_id, raw_query, response_text, db)
         await memory_updater.update(
-            user_id=user_id,
-            request_id=None,
-            query=raw_query,
-            response=response_text,
+            user_id=user_id, request_id=None, query=raw_query, response=response_text,
         )
 
         duration = int(time.monotonic() * 1000 - start_ms)
         logger.info(
-            "Orchestrator: завершено | intent=%s route=%s tools=%s modules=%s "
+            "Orchestrator: завершено | intent=%s route=%s template=%s tools=%s "
             "duration_ms=%d errors=%d",
-            intent_result.intent, route_result.route,
-            tools_called, modules_used,
-            duration, len(errors),
+            intent_result.intent, route_result.route, route_result.template_id,
+            tools_called, duration, len(errors),
         )
         return PipelineResult(
             response_text=response_text,
@@ -363,7 +371,15 @@ class PipelineOrchestrator:
             safety_level=safety_result.safety_level,
             llm_model=llm_model_used,
             llm_calls_count=llm_calls_count,
+            template_id=route_result.template_id,
         )
+
+    def _build_user_context(self, enriched: object) -> str:
+        """Сформировать текстовый контекст пользователя для Planner."""
+        from app.pipeline.response_generator import _format_user_profile, _format_conversation_history
+        profile_str = _format_user_profile(enriched.user_profile)
+        history_str = _format_conversation_history(enriched.conversation_history)
+        return f"Профиль:\n{profile_str}\n\nИстория:\n{history_str}"
 
     def _run_data_module(
         self,
@@ -371,16 +387,7 @@ class PipelineOrchestrator:
         activities: list[dict],
         entities: dict,
     ) -> dict:
-        """Запустить модуль обработки данных и вернуть результат как dict.
-
-        Args:
-            module_name: Имя модуля (activity_summary, training_load, trend_analyzer).
-            activities: Список активностей из ToolExecutor.
-            entities: Извлечённые сущности из IntentResult.
-
-        Returns:
-            Словарь с результатами модуля для передачи в ResponseGenerator.
-        """
+        """Запустить модуль обработки данных."""
         if module_name == "activity_summary":
             summary = compute_activity_summary(activities)
             return {
@@ -401,7 +408,6 @@ class PipelineOrchestrator:
             }
 
         if module_name == "trend_analyzer":
-            # Выбираем метрику по entity, если есть
             _ENTITY_TO_METRIC: dict[str, str] = {
                 "калории": "calories",
                 "дистанция": "distance_meters",
@@ -429,17 +435,8 @@ class PipelineOrchestrator:
         response_text: str,
         db: AsyncSession,
     ) -> None:
-        """Сохранить сообщения пользователя и ассистента в ChatMessage.
-
-        Args:
-            session_id: Идентификатор сессии.
-            user_id: Идентификатор пользователя (для создания сессии, если нет).
-            raw_query: Текст запроса пользователя.
-            response_text: Текст ответа ассистента.
-            db: Асинхронная сессия SQLAlchemy.
-        """
+        """Сохранить сообщения пользователя и ассистента в ChatMessage."""
         try:
-            # Проверяем наличие сессии, создаём если нет
             stmt = select(ChatSession).where(ChatSession.id == session_id)
             result = await db.execute(stmt)
             session = result.scalar_one_or_none()
@@ -448,7 +445,6 @@ class PipelineOrchestrator:
                 db.add(session)
                 await db.flush()
 
-            # Следующий порядковый индекс
             max_order_stmt = select(func.max(ChatMessage.order_index)).where(
                 ChatMessage.session_id == session_id
             )
@@ -456,16 +452,12 @@ class PipelineOrchestrator:
             max_order: int = max_result.scalar() or 0
 
             db.add(ChatMessage(
-                session_id=session_id,
-                role="user",
-                content=raw_query,
-                order_index=max_order + 1,
+                session_id=session_id, role="user",
+                content=raw_query, order_index=max_order + 1,
             ))
             db.add(ChatMessage(
-                session_id=session_id,
-                role="assistant",
-                content=response_text,
-                order_index=max_order + 2,
+                session_id=session_id, role="assistant",
+                content=response_text, order_index=max_order + 2,
             ))
             await db.commit()
         except Exception as exc:

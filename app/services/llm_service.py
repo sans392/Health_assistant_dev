@@ -7,8 +7,10 @@ Backward-compat: глобальный `ollama_client` соответствует
 `llm_registry.get_client("response")` — существующий код не требует изменений.
 """
 
+import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -245,6 +247,81 @@ class OllamaClient:
                 "model_loaded": None,
                 "error": f"Ошибка: {exc}",
             }
+
+    async def generate_stream(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        on_token: Callable[[str], None] | None = None,
+    ) -> "LLMResponse":
+        """Генерация текста через /api/generate с включённым стримингом.
+
+        Вызывает on_token(token) на каждый полученный токен.
+        Собирает полный ответ и возвращает его как LLMResponse.
+
+        Args:
+            prompt: Пользовательский промпт.
+            system_prompt: Системный промпт.
+            temperature: Температура генерации.
+            max_tokens: Максимальная длина ответа в токенах.
+            on_token: Callback — вызывается для каждого токена строки ответа.
+
+        Returns:
+            LLMResponse с полным ответом и метриками.
+        """
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "prompt": prompt,
+            "stream": True,
+            "options": {"temperature": temperature},
+        }
+        if system_prompt:
+            payload["system"] = system_prompt
+        if max_tokens:
+            payload["options"]["num_predict"] = max_tokens
+
+        start_ms = time.monotonic() * 1000
+        full_content: list[str] = []
+
+        try:
+            async with self._make_client() as client:
+                async with client.stream("POST", "/api/generate", json=payload) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        token = chunk.get("response", "")
+                        if token:
+                            full_content.append(token)
+                            if on_token is not None:
+                                on_token(token)
+                        if chunk.get("done"):
+                            break
+        except httpx.TimeoutException:
+            logger.error("Ollama stream timeout: model=%s", self._model)
+            raise
+
+        content = "".join(full_content)
+        duration_ms = time.monotonic() * 1000 - start_ms
+
+        logger.info(
+            "LLM stream: model=%s prompt_len=%d response_len=%d duration_ms=%.1f",
+            self._model, len(prompt), len(content), duration_ms,
+        )
+
+        return LLMResponse(
+            content=content,
+            model=self._model,
+            prompt_length=len(prompt),
+            response_length=len(content),
+            duration_ms=round(duration_ms, 1),
+        )
 
     async def list_models(self) -> list[str]:
         """Получить список доступных моделей в Ollama.

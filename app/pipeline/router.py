@@ -1,52 +1,61 @@
-"""Модуль маршрутизации запроса в нужную ветку обработки."""
+"""Модуль маршрутизации запроса (Phase 2, Issue #28).
+
+4 маршрута:
+- fast_direct_answer : greeting / off_topic / general_question — без tools
+- tool_simple        : data_retrieval / data_analysis — прямые tool-calls
+- template_plan      : plan_request / health_concern с ключевыми словами → шаблон
+- planner            : сложные plan_request / неоднозначные health_concern → LLM loop
+"""
 
 from dataclasses import dataclass
 
 from app.pipeline.intent_detection import IntentResult
 from app.pipeline.safety_check import SafetyResult
 
+_BLOCKED_ROUTE = "blocked"
+
+# Ключевые слова для выбора шаблона
+_WEEKLY_KEYWORDS: tuple[str, ...] = (
+    "неделя", "на неделю", "программа", "расписание", "на следующую неделю",
+    "недельный", "на 7 дней",
+)
+_OVERTRAINING_KEYWORDS: tuple[str, ...] = (
+    "перетренированность", "перетренирован", "усталость", "переутомление",
+    "перегруз", "перетрениров",
+)
+_PROGRESS_KEYWORDS: tuple[str, ...] = (
+    "прогресс", "мой прогресс", "результаты", "моя динамика", "как я вырос",
+    "насколько улучшил",
+)
+_RECOVERY_KEYWORDS: tuple[str, ...] = (
+    "восстановление", "восстановиться", "восстанавливаться", "как восстановить",
+    "помоги восстановиться",
+)
+
+
+def _matches(text: str, keywords: tuple[str, ...]) -> bool:
+    return any(kw in text for kw in keywords)
+
 
 @dataclass
 class RouteResult:
     """Результат маршрутизации запроса."""
 
-    route: str                    # название маршрута
-    fast_path: bool               # True если fast_path (без Tool Executor и Data Processing)
-    blocked: bool                 # True если safety заблокировал запрос
-    block_message: str | None     # Сообщение при блокировке
-    tool_calls: list[str] | None  # Какие tools нужно вызвать
-    modules: list[str] | None     # Какие модули data processing нужны
-
-
-# Маршрут при блокировке safety
-_BLOCKED_ROUTE = "blocked"
-
-# Маппинг intent → (route, fast_path, tool_calls, modules)
-_INTENT_ROUTES: dict[str, tuple[str, bool, list[str] | None, list[str] | None]] = {
-    "direct_question": ("fast_direct_answer", True, None, None),
-    "general_chat": ("fast_direct_answer", True, None, None),
-    "data_retrieval": ("tool_simple", False, ["get_activities", "get_daily_facts"], None),
-    "data_analysis": (
-        "data_analysis_simple",
-        False,
-        ["get_activities", "get_daily_facts"],
-        ["activity_summary", "trend_analyzer"],
-    ),
-    "plan_request": (
-        "plan_request",
-        False,
-        ["get_activities", "get_user_profile"],
-        ["training_load"],
-    ),
-    "health_concern": ("health_concern", False, None, None),
-}
+    route: str                          # fast_direct_answer | tool_simple | template_plan | planner | blocked
+    fast_path: bool                     # True для fast_direct_answer
+    blocked: bool                       # True если safety заблокировал
+    block_message: str | None           # Сообщение при блокировке
+    tool_calls: list[str] | None        # Инструменты для tool_simple
+    modules: list[str] | None          # Модули data processing для tool_simple
+    template_id: str | None = None      # ID шаблона для template_plan
+    reason: str = ""                    # Причина выбора маршрута (для логов)
 
 
 class Router:
-    """Маршрутизатор запросов пайплайна."""
+    """Маршрутизатор — выбирает ветку обработки по intent + keywords."""
 
     def route(self, intent: IntentResult, safety: SafetyResult) -> RouteResult:
-        """Определяет маршрут обработки запроса.
+        """Определить маршрут запроса.
 
         Args:
             intent: Результат определения намерения.
@@ -55,7 +64,6 @@ class Router:
         Returns:
             RouteResult с выбранным маршрутом.
         """
-        # Safety high_priority блокирует выполнение пайплайна
         if not safety.is_safe or safety.safety_level == "high_priority":
             return RouteResult(
                 route=_BLOCKED_ROUTE,
@@ -64,31 +72,126 @@ class Router:
                 block_message=safety.redirect_message,
                 tool_calls=None,
                 modules=None,
+                template_id=None,
+                reason="safety_high_priority",
             )
 
-        # health_concern с high_priority тоже блокируем (дополнительная защита)
-        if intent.intent == "health_concern" and safety.safety_level == "high_priority":
+        query = intent.raw_query.lower()
+        intent_name = intent.intent
+
+        if intent_name in ("direct_question", "general_chat", "off_topic", "emergency"):
             return RouteResult(
-                route=_BLOCKED_ROUTE,
-                fast_path=False,
-                blocked=True,
-                block_message=safety.redirect_message,
+                route="fast_direct_answer",
+                fast_path=True,
+                blocked=False,
+                block_message=None,
                 tool_calls=None,
                 modules=None,
+                reason=f"fast_direct_{intent_name}",
             )
 
-        # Выбираем маршрут по intent
-        route_name, fast_path, tool_calls, modules = _INTENT_ROUTES.get(
-            intent.intent,
-            # Fallback: general_chat → fast path
-            ("fast_direct_answer", True, None, None),
-        )
+        if intent_name == "data_retrieval":
+            return RouteResult(
+                route="tool_simple",
+                fast_path=False,
+                blocked=False,
+                block_message=None,
+                tool_calls=["get_activities", "get_daily_facts"],
+                modules=None,
+                reason="data_retrieval",
+            )
+
+        if intent_name == "data_analysis":
+            return RouteResult(
+                route="tool_simple",
+                fast_path=False,
+                blocked=False,
+                block_message=None,
+                tool_calls=["get_activities", "get_daily_facts"],
+                modules=["activity_summary", "trend_analyzer"],
+                reason="data_analysis",
+            )
+
+        if intent_name == "plan_request":
+            return self._route_plan_request(query)
+
+        if intent_name == "health_concern":
+            return self._route_health_concern(query)
 
         return RouteResult(
-            route=route_name,
-            fast_path=fast_path,
+            route="fast_direct_answer",
+            fast_path=True,
             blocked=False,
             block_message=None,
-            tool_calls=tool_calls,
-            modules=modules,
+            tool_calls=None,
+            modules=None,
+            reason=f"fallback_{intent_name}",
+        )
+
+    def _route_plan_request(self, query: str) -> RouteResult:
+        """Выбрать шаблон или planner для plan_request."""
+        if _matches(query, _PROGRESS_KEYWORDS):
+            return RouteResult(
+                route="template_plan",
+                fast_path=False,
+                blocked=False,
+                block_message=None,
+                tool_calls=None,
+                modules=None,
+                template_id="progress_report",
+                reason="plan_request_progress",
+            )
+        if _matches(query, _WEEKLY_KEYWORDS):
+            return RouteResult(
+                route="template_plan",
+                fast_path=False,
+                blocked=False,
+                block_message=None,
+                tool_calls=None,
+                modules=None,
+                template_id="weekly_training_plan",
+                reason="plan_request_weekly",
+            )
+        return RouteResult(
+            route="planner",
+            fast_path=False,
+            blocked=False,
+            block_message=None,
+            tool_calls=None,
+            modules=None,
+            reason="plan_request_complex",
+        )
+
+    def _route_health_concern(self, query: str) -> RouteResult:
+        """Выбрать шаблон или planner для health_concern."""
+        if _matches(query, _OVERTRAINING_KEYWORDS):
+            return RouteResult(
+                route="template_plan",
+                fast_path=False,
+                blocked=False,
+                block_message=None,
+                tool_calls=None,
+                modules=None,
+                template_id="overtraining_check",
+                reason="health_concern_overtraining",
+            )
+        if _matches(query, _RECOVERY_KEYWORDS):
+            return RouteResult(
+                route="template_plan",
+                fast_path=False,
+                blocked=False,
+                block_message=None,
+                tool_calls=None,
+                modules=None,
+                template_id="recovery_report",
+                reason="health_concern_recovery",
+            )
+        return RouteResult(
+            route="planner",
+            fast_path=False,
+            blocked=False,
+            block_message=None,
+            tool_calls=None,
+            modules=None,
+            reason="health_concern_ambiguous",
         )

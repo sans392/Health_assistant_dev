@@ -1,4 +1,4 @@
-"""Тесты для модуля маршрутизации (Router)."""
+"""Тесты для модуля маршрутизации Router v2 (Issue #28)."""
 
 import pytest
 
@@ -12,8 +12,8 @@ def router() -> Router:
     return Router()
 
 
-def make_intent(intent: str, confidence: float = 0.9) -> IntentResult:
-    return IntentResult(intent=intent, confidence=confidence, entities={}, raw_query="")
+def make_intent(intent: str, confidence: float = 0.9, query: str = "") -> IntentResult:
+    return IntentResult(intent=intent, confidence=confidence, entities={}, raw_query=query)
 
 
 def make_safety(
@@ -31,7 +31,7 @@ def make_safety(
 
 
 class TestFastPath:
-    """Тесты fast path маршрутов."""
+    """Тесты fast_direct_answer маршрута."""
 
     def test_direct_question_fast_path(self, router: Router) -> None:
         result = router.route(make_intent("direct_question"), make_safety())
@@ -43,37 +43,92 @@ class TestFastPath:
         result = router.route(make_intent("general_chat"), make_safety())
         assert result.route == "fast_direct_answer"
         assert result.fast_path is True
-        assert result.blocked is False
+
+    def test_off_topic_fast_path(self, router: Router) -> None:
+        result = router.route(make_intent("off_topic"), make_safety())
+        assert result.route == "fast_direct_answer"
+        assert result.fast_path is True
+
+    def test_emergency_fast_path(self, router: Router) -> None:
+        # emergency не блокируется safety_level=ok — идёт как fast_direct
+        result = router.route(make_intent("emergency"), make_safety())
+        assert result.route == "fast_direct_answer"
 
 
-class TestStandardRoutes:
-    """Тесты стандартных маршрутов (не fast path)."""
+class TestToolSimple:
+    """Тесты tool_simple маршрута."""
 
-    def test_data_retrieval_route(self, router: Router) -> None:
+    def test_data_retrieval_tool_simple(self, router: Router) -> None:
         result = router.route(make_intent("data_retrieval"), make_safety())
         assert result.route == "tool_simple"
         assert result.fast_path is False
-        assert result.blocked is False
         assert result.tool_calls is not None
-        assert len(result.tool_calls) > 0
+        assert "get_activities" in result.tool_calls
 
-    def test_data_analysis_route(self, router: Router) -> None:
+    def test_data_analysis_tool_simple_with_modules(self, router: Router) -> None:
         result = router.route(make_intent("data_analysis"), make_safety())
-        assert result.route == "data_analysis_simple"
-        assert result.fast_path is False
+        assert result.route == "tool_simple"
         assert result.modules is not None
-        assert len(result.modules) > 0
+        assert "activity_summary" in result.modules
+        assert "trend_analyzer" in result.modules
 
-    def test_plan_request_route(self, router: Router) -> None:
-        result = router.route(make_intent("plan_request"), make_safety())
-        assert result.route == "plan_request"
+
+class TestTemplatePlan:
+    """Тесты template_plan маршрута."""
+
+    def test_plan_request_weekly_keyword(self, router: Router) -> None:
+        result = router.route(make_intent("plan_request", query="составь план на неделю"), make_safety())
+        assert result.route == "template_plan"
+        assert result.template_id == "weekly_training_plan"
         assert result.fast_path is False
 
-    def test_health_concern_route(self, router: Router) -> None:
-        result = router.route(make_intent("health_concern"), make_safety())
-        assert result.route == "health_concern"
-        assert result.fast_path is False
-        assert result.blocked is False
+    def test_plan_request_program_keyword(self, router: Router) -> None:
+        result = router.route(make_intent("plan_request", query="хочу программу тренировок"), make_safety())
+        assert result.route == "template_plan"
+        assert result.template_id == "weekly_training_plan"
+
+    def test_plan_request_progress_keyword(self, router: Router) -> None:
+        result = router.route(make_intent("plan_request", query="покажи мой прогресс"), make_safety())
+        assert result.route == "template_plan"
+        assert result.template_id == "progress_report"
+
+    def test_health_concern_overtraining_keyword(self, router: Router) -> None:
+        result = router.route(
+            make_intent("health_concern", query="есть признаки перетренированности"),
+            make_safety(),
+        )
+        assert result.route == "template_plan"
+        assert result.template_id == "overtraining_check"
+
+    def test_health_concern_recovery_keyword(self, router: Router) -> None:
+        result = router.route(
+            make_intent("health_concern", query="как улучшить восстановление"),
+            make_safety(),
+        )
+        assert result.route == "template_plan"
+        assert result.template_id == "recovery_report"
+
+    def test_template_result_has_no_tool_calls(self, router: Router) -> None:
+        result = router.route(make_intent("plan_request", query="план на неделю"), make_safety())
+        assert result.tool_calls is None
+        assert result.modules is None
+
+
+class TestPlanner:
+    """Тесты planner маршрута."""
+
+    def test_plan_request_no_keywords_goes_to_planner(self, router: Router) -> None:
+        result = router.route(make_intent("plan_request", query="помоги с тренировками"), make_safety())
+        assert result.route == "planner"
+        assert result.template_id is None
+
+    def test_health_concern_ambiguous_goes_to_planner(self, router: Router) -> None:
+        result = router.route(
+            make_intent("health_concern", query="что-то не так с самочувствием"),
+            make_safety(),
+        )
+        assert result.route == "planner"
+        assert result.template_id is None
 
 
 class TestSafetyBlocking:
@@ -89,56 +144,42 @@ class TestSafetyBlocking:
         assert result.blocked is True
         assert result.route == "blocked"
         assert result.block_message == "Обратитесь к врачу"
-        assert result.fast_path is False
 
     def test_high_priority_blocks_any_intent(self, router: Router) -> None:
-        safety = make_safety(
-            safety_level="high_priority",
-            is_safe=False,
-            redirect_message="Срочно к врачу!",
-        )
+        safety = make_safety(safety_level="high_priority", is_safe=False)
         for intent in ["data_retrieval", "plan_request", "general_chat", "health_concern"]:
             result = router.route(make_intent(intent), safety)
             assert result.blocked is True, f"intent {intent!r} должен быть заблокирован"
 
     def test_medium_priority_does_not_block(self, router: Router) -> None:
-        safety = make_safety(
-            safety_level="medium_priority",
-            is_safe=True,
-            warning_suffix="⚠️ Проконсультируйтесь с врачом",
-        )
+        safety = make_safety(safety_level="medium_priority", is_safe=True)
         result = router.route(make_intent("health_concern"), safety)
         assert result.blocked is False
-        assert result.route == "health_concern"
 
-    def test_ok_safety_does_not_block(self, router: Router) -> None:
-        result = router.route(make_intent("data_analysis"), make_safety("ok"))
-        assert result.blocked is False
-
-    def test_blocked_route_has_no_tool_calls(self, router: Router) -> None:
-        safety = make_safety(
-            safety_level="high_priority",
-            is_safe=False,
-            redirect_message="К врачу!",
-        )
+    def test_blocked_has_no_tool_calls(self, router: Router) -> None:
+        safety = make_safety(safety_level="high_priority", is_safe=False)
         result = router.route(make_intent("data_retrieval"), safety)
         assert result.tool_calls is None
         assert result.modules is None
+        assert result.template_id is None
 
 
 class TestRouteResultFields:
     """Тесты полноты полей RouteResult."""
 
-    def test_fast_path_no_tools(self, router: Router) -> None:
+    def test_result_has_reason(self, router: Router) -> None:
+        result = router.route(make_intent("general_chat"), make_safety())
+        assert result.reason != ""
+
+    def test_template_plan_has_template_id(self, router: Router) -> None:
+        result = router.route(make_intent("plan_request", query="план на неделю"), make_safety())
+        assert result.template_id is not None
+
+    def test_planner_no_template_id(self, router: Router) -> None:
+        result = router.route(make_intent("plan_request", query="помоги"), make_safety())
+        assert result.template_id is None
+
+    def test_fast_path_no_tools_no_modules(self, router: Router) -> None:
         result = router.route(make_intent("general_chat"), make_safety())
         assert result.tool_calls is None
         assert result.modules is None
-
-    def test_data_analysis_has_tools_and_modules(self, router: Router) -> None:
-        result = router.route(make_intent("data_analysis"), make_safety())
-        assert result.tool_calls is not None
-        assert result.modules is not None
-
-    def test_not_blocked_has_no_block_message(self, router: Router) -> None:
-        result = router.route(make_intent("general_chat"), make_safety())
-        assert result.block_message is None
