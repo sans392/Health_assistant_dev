@@ -3,8 +3,10 @@
 Все endpoints защищены HTTP Basic Auth (admin_username / admin_password из settings).
 
 Logs API (из issue #12):
-  GET /api/admin/logs              — список логов с фильтрами и пагинацией
-  GET /api/admin/logs/{id}         — детали одного лога
+  GET /api/admin/logs                       — список логов с фильтрами и пагинацией
+  GET /api/admin/logs/{id}                  — детали одного лога
+  GET /api/admin/logs/{id}/llm-calls        — LLM-вызовы конкретного лога (issue #34)
+  GET /api/admin/logs/{id}/stage-trace      — stage trace конкретного лога (issue #34)
 
 Admin API (issue #14):
   GET  /api/admin/stats            — статистика для dashboard
@@ -12,13 +14,15 @@ Admin API (issue #14):
   GET  /api/admin/activities       — тренировки с фильтрами
   GET  /api/admin/daily-facts      — дневные метрики
   GET  /api/admin/profiles         — профили пользователей
-  PUT  /api/admin/profiles/{id}    — редактирование профиля
+  PUT  /api/admin/profiles/{id}    — редактирование профиля (базовые поля)
+  POST /api/admin/profiles/{id}    — полное обновление с валидацией JSON (issue #34)
   POST /api/admin/seed             — запуск SeedGenerator с параметрами (issue #33)
   POST /api/admin/seed/preview     — предпросмотр нескольких записей без записи (issue #33)
   GET  /api/admin/seed/runs        — журнал запусков SeedGenerator (issue #33)
   POST /api/admin/test-llm         — тест промпта через Ollama
 """
 
+import json
 import secrets
 from datetime import datetime, timedelta
 from typing import Any
@@ -32,6 +36,7 @@ from app.config import settings
 from app.db import get_db
 from app.models.activity import Activity
 from app.models.daily_fact import DailyFact
+from app.models.llm_call import LLMCall
 from app.models.pipeline_log import PipelineLog
 from app.models.user_profile import UserProfile
 
@@ -64,6 +69,8 @@ def _require_admin(credentials: HTTPBasicCredentials = Depends(_security)) -> No
 # ---------------------------------------------------------------------------
 
 def _log_to_dict(log: PipelineLog) -> dict[str, Any]:
+    stage_trace = log.stage_trace or []
+    rag_chunks_used = log.rag_chunks_used or []
     return {
         "id": log.id,
         "user_id": log.user_id,
@@ -79,6 +86,8 @@ def _log_to_dict(log: PipelineLog) -> dict[str, Any]:
         "modules_used": log.modules_used,
         "llm_model_used": log.llm_model_used,
         "llm_calls_count": log.llm_calls_count,
+        "stages_count": len(stage_trace),
+        "rag_chunks_count": len(rag_chunks_used),
         "total_duration_ms": log.total_duration_ms,
         "response_length": log.response_length,
         "errors": log.errors,
@@ -89,6 +98,9 @@ def _log_to_dict(log: PipelineLog) -> dict[str, Any]:
 def _log_to_dict_full(log: PipelineLog) -> dict[str, Any]:
     data = _log_to_dict(log)
     data["response_text"] = log.response_text
+    data["stage_trace"] = log.stage_trace or []
+    data["llm_role_usage"] = log.llm_role_usage or {}
+    data["rag_chunks_used"] = log.rag_chunks_used or []
     return data
 
 
@@ -158,6 +170,7 @@ async def list_logs(
     intent: str | None = Query(None),
     route: str | None = Query(None),
     has_errors: bool | None = Query(None),
+    model_role: str | None = Query(None, description="intent_llm | response | planner"),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Список логов пайплайна с пагинацией и фильтрами."""
@@ -184,6 +197,11 @@ async def list_logs(
         conditions.append(PipelineLog.errors.is_not(None))
     elif has_errors is False:
         conditions.append(PipelineLog.errors.is_(None))
+
+    # Фильтр по роли LLM — через подзапрос к llm_calls
+    if model_role:
+        subq = select(LLMCall.request_id).where(LLMCall.role == model_role).distinct()
+        conditions.append(PipelineLog.id.in_(subq))
 
     where_clause = and_(*conditions) if conditions else True
 
@@ -218,6 +236,69 @@ async def get_log(
     if log is None:
         raise HTTPException(status_code=404, detail=f"Лог {request_id} не найден")
     return _log_to_dict_full(log)
+
+
+@router.get("/logs/{request_id}/llm-calls", dependencies=[Depends(_require_admin)])
+async def get_log_llm_calls(
+    request_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """LLM-вызовы конкретного запроса (issue #34)."""
+    calls = (await db.execute(
+        select(LLMCall)
+        .where(LLMCall.request_id == request_id)
+        .order_by(LLMCall.timestamp)
+    )).scalars().all()
+
+    return {
+        "request_id": request_id,
+        "total": len(calls),
+        "items": [
+            {
+                "id": c.id,
+                "role": c.role,
+                "model": c.model,
+                "duration_ms": c.duration_ms,
+                "prompt_length": c.prompt_length,
+                "response_length": c.response_length,
+                "prompt_preview": (c.prompt or "")[:200],
+                "response_preview": (c.response or "")[:200],
+                "prompt": c.prompt or "",
+                "response": c.response or "",
+                "iteration": c.iteration,
+                "timestamp": c.timestamp.isoformat() if c.timestamp else None,
+            }
+            for c in calls
+        ],
+    }
+
+
+@router.get("/logs/{request_id}/stage-trace", dependencies=[Depends(_require_admin)])
+async def get_log_stage_trace(
+    request_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Stage trace конкретного запроса (issue #34)."""
+    result = await db.execute(select(PipelineLog).where(PipelineLog.id == request_id))
+    log = result.scalar_one_or_none()
+    if log is None:
+        raise HTTPException(status_code=404, detail=f"Лог {request_id} не найден")
+
+    stage_trace = log.stage_trace or []
+    total_ms = log.total_duration_ms or 1
+
+    # Добавляем процент для waterfall-визуализации
+    for stage in stage_trace:
+        dur = stage.get("duration_ms") or 0
+        stage["width_pct"] = round(dur / total_ms * 100, 1) if total_ms else 0
+        start = stage.get("start_ms") or 0
+        stage["offset_pct"] = round(start / total_ms * 100, 1) if total_ms else 0
+
+    return {
+        "request_id": request_id,
+        "total_duration_ms": total_ms,
+        "stages": stage_trace,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +509,6 @@ async def update_profile(
     if profile is None:
         raise HTTPException(status_code=404, detail="Профиль не найден")
 
-    # Разрешённые поля для редактирования
     allowed_fields = {
         "name", "age", "weight_kg", "height_cm", "gender",
         "max_heart_rate", "resting_heart_rate", "training_goals",
@@ -437,6 +517,59 @@ async def update_profile(
     for field, value in payload.items():
         if field in allowed_fields:
             setattr(profile, field, value)
+
+    profile.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(profile)
+    return _profile_to_dict(profile)
+
+
+@router.post("/profiles/{profile_id}", dependencies=[Depends(_require_admin)])
+async def update_profile_full(
+    profile_id: str,
+    payload: dict[str, Any] = Body(...),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Полное обновление профиля с валидацией JSON-полей (issue #34).
+
+    JSON-поля (injuries, chronic_conditions, preferred_sports, training_goals)
+    принимаются как строки (из textarea) и парсятся на сервере.
+    Невалидный JSON → HTTP 400.
+    """
+    result = await db.execute(select(UserProfile).where(UserProfile.id == profile_id))
+    profile = result.scalar_one_or_none()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Профиль не найден")
+
+    allowed_fields = {
+        "name", "age", "weight_kg", "height_cm", "gender",
+        "max_heart_rate", "resting_heart_rate", "training_goals",
+        "experience_level", "injuries", "chronic_conditions", "preferred_sports",
+    }
+    json_list_fields = {"injuries", "chronic_conditions", "preferred_sports", "training_goals"}
+
+    for field, value in payload.items():
+        if field not in allowed_fields:
+            continue
+        if field in json_list_fields and isinstance(value, str):
+            value = value.strip()
+            if not value:
+                value = []
+            else:
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Поле '{field}' должно быть валидным JSON-массивом",
+                    )
+                if not isinstance(parsed, list):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Поле '{field}' должно быть JSON-массивом (list)",
+                    )
+                value = parsed
+        setattr(profile, field, value)
 
     profile.updated_at = datetime.utcnow()
     await db.commit()

@@ -174,10 +174,12 @@ async def admin_logs(
     intent: str | None = Query(None),
     route: str | None = Query(None),
     has_errors: str | None = Query(None),
+    model_role: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ) -> HTMLResponse:
     """Список логов с фильтрами и пагинацией."""
     from datetime import datetime
+    from app.models.llm_call import LLMCall
 
     conditions = []
     if date_from:
@@ -199,6 +201,9 @@ async def admin_logs(
         conditions.append(PipelineLog.errors.is_not(None))
     elif has_errors == "false":
         conditions.append(PipelineLog.errors.is_(None))
+    if model_role:
+        subq = select(LLMCall.request_id).where(LLMCall.role == model_role).distinct()
+        conditions.append(PipelineLog.id.in_(subq))
 
     where_clause = and_(*conditions) if conditions else True
     total = (await db.execute(
@@ -211,7 +216,6 @@ async def admin_logs(
         .offset((page - 1) * per_page).limit(per_page)
     )).scalars().all()
 
-    # Список уникальных intent и route для фильтров
     all_intents = (await db.execute(
         select(distinct(PipelineLog.intent)).where(PipelineLog.intent.is_not(None))
     )).scalars().all()
@@ -221,16 +225,18 @@ async def admin_logs(
 
     pages = (total + per_page - 1) // per_page if total > 0 else 0
 
-    # Строка фильтров для пагинации
     filter_parts = []
     if date_from: filter_parts.append(f"date_from={date_from}")
     if date_to: filter_parts.append(f"date_to={date_to}")
     if intent: filter_parts.append(f"intent={intent}")
     if route: filter_parts.append(f"route={route}")
     if has_errors: filter_parts.append(f"has_errors={has_errors}")
+    if model_role: filter_parts.append(f"model_role={model_role}")
     filter_qs = ("&" + "&".join(filter_parts)) if filter_parts else ""
 
     def log_dict(log: PipelineLog) -> dict:
+        stage_trace = log.stage_trace or []
+        rag_chunks = log.rag_chunks_used or []
         return {
             "id": log.id,
             "timestamp": log.timestamp.isoformat() if log.timestamp else None,
@@ -239,6 +245,9 @@ async def admin_logs(
             "route": log.route,
             "safety_level": log.safety_level,
             "total_duration_ms": log.total_duration_ms,
+            "llm_calls_count": log.llm_calls_count or 0,
+            "stages_count": len(stage_trace),
+            "rag_chunks_count": len(rag_chunks),
             "has_errors": bool(log.errors),
         }
 
@@ -259,6 +268,7 @@ async def admin_logs(
                 "intent": intent,
                 "route": route,
                 "has_errors": has_errors,
+                "model_role": model_role,
             },
             "intents": sorted(all_intents),
             "routes": sorted(all_routes),
@@ -272,11 +282,28 @@ async def admin_log_detail(
     request_id: str,
     db: AsyncSession = Depends(get_db),
 ) -> HTMLResponse:
-    """Детальный просмотр одного лога."""
+    """Детальный просмотр одного лога — 5 вкладок (issue #34)."""
+    from app.models.llm_call import LLMCall
+
     result = await db.execute(select(PipelineLog).where(PipelineLog.id == request_id))
     log = result.scalar_one_or_none()
     if log is None:
         raise HTTPException(status_code=404, detail="Лог не найден")
+
+    # LLM calls для вкладки LLM Calls
+    llm_calls_rows = (await db.execute(
+        select(LLMCall)
+        .where(LLMCall.request_id == request_id)
+        .order_by(LLMCall.timestamp)
+    )).scalars().all()
+
+    total_ms = log.total_duration_ms or 1
+    stage_trace = log.stage_trace or []
+    for stage in stage_trace:
+        dur = stage.get("duration_ms") or 0
+        start = stage.get("start_ms") or 0
+        stage["width_pct"] = round(dur / total_ms * 100, 1) if total_ms else 0
+        stage["offset_pct"] = round(start / total_ms * 100, 1) if total_ms else 0
 
     log_dict = {
         "id": log.id,
@@ -289,19 +316,44 @@ async def admin_log_detail(
         "route": log.route,
         "fast_path": log.fast_path,
         "safety_level": log.safety_level,
-        "tools_called": log.tools_called,
-        "modules_used": log.modules_used,
+        "tools_called": log.tools_called or [],
+        "modules_used": log.modules_used or [],
         "llm_model_used": log.llm_model_used,
         "llm_calls_count": log.llm_calls_count,
         "total_duration_ms": log.total_duration_ms,
         "response_length": log.response_length,
         "errors": log.errors,
         "response_text": log.response_text,
+        "stage_trace": stage_trace,
+        "llm_role_usage": log.llm_role_usage or {},
+        "rag_chunks_used": log.rag_chunks_used or [],
     }
+
+    llm_calls_list = [
+        {
+            "id": c.id,
+            "role": c.role,
+            "model": c.model,
+            "duration_ms": c.duration_ms,
+            "prompt_length": c.prompt_length,
+            "response_length": c.response_length,
+            "prompt_preview": (c.prompt or "")[:200],
+            "response_preview": (c.response or "")[:200],
+            "prompt": c.prompt or "",
+            "response": c.response or "",
+            "iteration": c.iteration,
+        }
+        for c in llm_calls_rows
+    ]
 
     return templates.TemplateResponse(
         "log_detail.html",
-        {"request": request, **_base_ctx("logs"), "log": log_dict},
+        {
+            "request": request,
+            **_base_ctx("logs"),
+            "log": log_dict,
+            "llm_calls": llm_calls_list,
+        },
     )
 
 
@@ -485,17 +537,34 @@ async def data_profiles_partial(
         select(UserProfile).order_by(UserProfile.created_at.desc())
     )).scalars().all()
 
+    import json as _json
+
     def profile_dict(p: UserProfile) -> dict:
         return {
-            "id": p.id, "user_id": p.user_id, "name": p.name, "age": p.age,
-            "weight_kg": p.weight_kg, "height_cm": p.height_cm,
-            "experience_level": p.experience_level, "training_goals": p.training_goals,
+            "id": p.id,
+            "user_id": p.user_id,
+            "name": p.name,
+            "age": p.age,
+            "weight_kg": p.weight_kg,
+            "height_cm": p.height_cm,
+            "gender": p.gender,
+            "experience_level": p.experience_level,
+            "training_goals": p.training_goals or [],
             "max_heart_rate": p.max_heart_rate,
+            "resting_heart_rate": p.resting_heart_rate,
+            "injuries": p.injuries or [],
+            "chronic_conditions": p.chronic_conditions or [],
+            "preferred_sports": p.preferred_sports or [],
         }
 
     return templates.TemplateResponse(
         "partials/profiles_table.html",
-        {"request": request, "profiles": [profile_dict(p) for p in profiles]},
+        {
+            "request": request,
+            "profiles": [profile_dict(p) for p in profiles],
+            "admin_user": settings.admin_username,
+            "admin_pass": settings.admin_password,
+        },
     )
 
 
