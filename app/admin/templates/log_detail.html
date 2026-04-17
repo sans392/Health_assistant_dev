@@ -2,6 +2,30 @@
 {% block title %}Лог {{ log.id[:8] }}{% endblock %}
 
 {% block content %}
+<style>
+  .tab-bar { display: flex; gap: 0; border-bottom: 1px solid var(--pico-card-border-color); margin-bottom: 24px; }
+  .tab-btn { background: none; border: none; padding: 10px 18px; font-size: 13px; cursor: pointer;
+    color: var(--pico-muted-color); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab-btn.active { color: var(--pico-color); border-bottom-color: #3b82f6; font-weight: 600; }
+  .tab-btn:hover:not(.active) { color: var(--pico-color); }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+
+  /* Waterfall */
+  .waterfall-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; font-size: 13px; }
+  .waterfall-label { width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pico-muted-color); flex-shrink: 0; }
+  .waterfall-track { flex: 1; height: 20px; background: rgba(255,255,255,.05); border-radius: 4px; position: relative; }
+  .waterfall-bar { position: absolute; height: 100%; background: #3b82f6; border-radius: 4px; min-width: 3px; }
+  .waterfall-ms { width: 70px; text-align: right; font-size: 12px; color: var(--pico-muted-color); flex-shrink: 0; }
+
+  /* LLM call expand */
+  .llm-call-row td { vertical-align: top; }
+  .llm-expand { display: none; padding: 12px; background: #0d1117; border-radius: 6px; margin-top: 8px; }
+  .llm-expand textarea { width: 100%; font-family: monospace; font-size: 12px; background: transparent;
+    border: none; resize: vertical; min-height: 80px; color: #e2e8f0; outline: none; }
+  .expand-btn { font-size: 11px; padding: 2px 8px; cursor: pointer; }
+</style>
+
 <div class="page-header">
   <h1>Pipeline Trace</h1>
   <p>
@@ -40,45 +64,239 @@
   </div>
 </div>
 
-<!-- Raw query -->
-<div class="section-title">Запрос пользователя</div>
-<blockquote>{{ log.raw_query }}</blockquote>
-
-<!-- Tools & Modules -->
-<div class="section-title">Tools & Modules</div>
-<table>
-  <thead><tr><th>Тип</th><th>Список</th></tr></thead>
-  <tbody>
-    <tr><td>Tools called</td><td>{{ (log.tools_called or []) | join(', ') or '—' }}</td></tr>
-    <tr><td>Modules used</td><td>{{ (log.modules_used or []) | join(', ') or '—' }}</td></tr>
-  </tbody>
-</table>
-
-<!-- Response -->
-<div class="section-title">Ответ ассистента ({{ log.response_length or 0 }} символов)</div>
-{% if log.response_text %}
-<pre class="trace">{{ log.response_text }}</pre>
-{% else %}
-<p style="color:var(--pico-muted-color)">Нет текста ответа</p>
-{% endif %}
-
-<!-- Errors -->
-{% if log.errors %}
-<div class="section-title">Ошибки</div>
-<div style="background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.3);border-radius:8px;padding:14px">
-  {% for err in log.errors %}
-  <div style="font-size:13px;color:#f85149;font-family:monospace;margin-bottom:6px">{{ err }}</div>
-  {% endfor %}
+<!-- Tabs -->
+<div class="tab-bar">
+  <button class="tab-btn active" onclick="switchTab('overview', this)">Overview</button>
+  <button class="tab-btn" onclick="switchTab('stage-trace', this)">Stage Trace {% if log.stage_trace %}<small>({{ log.stage_trace|length }})</small>{% endif %}</button>
+  <button class="tab-btn" onclick="switchTab('llm-calls', this)">LLM Calls {% if llm_calls %}<small>({{ llm_calls|length }})</small>{% endif %}</button>
+  <button class="tab-btn" onclick="switchTab('tool-results', this)">Tool Results {% if log.tools_called %}<small>({{ log.tools_called|length }})</small>{% endif %}</button>
+  <button class="tab-btn" onclick="switchTab('rag-chunks', this)">RAG Chunks {% if log.rag_chunks_used %}<small>({{ log.rag_chunks_used|length }})</small>{% endif %}</button>
 </div>
-{% endif %}
 
-<!-- Meta -->
-<details class="collapsible" style="margin-top:24px">
-  <summary>Полные метаданные (JSON)</summary>
-  <pre class="trace" style="margin-top:10px">{{ log | tojson(indent=2) }}</pre>
-</details>
+<!-- Tab: Overview -->
+<div id="tab-overview" class="tab-pane active">
+  <div class="section-title">Запрос пользователя</div>
+  <blockquote>{{ log.raw_query }}</blockquote>
 
-<div style="margin-top:24px">
+  <div class="section-title">Метаданные</div>
+  <table>
+    <tbody>
+      <tr><td style="width:200px;color:var(--pico-muted-color)">User ID</td><td><code>{{ log.user_id or '—' }}</code></td></tr>
+      <tr><td>Session ID</td><td><code>{{ log.session_id or '—' }}</code></td></tr>
+      <tr><td>Timestamp</td><td>{{ log.timestamp or '—' }}</td></tr>
+      <tr><td>Route</td><td><code>{{ log.route or '—' }}</code> {% if log.fast_path %}<span class="badge badge-ok">fast_path</span>{% endif %}</td></tr>
+      <tr><td>LLM модель</td><td>{{ log.llm_model_used or '—' }}</td></tr>
+      <tr><td>LLM вызовов</td><td>{{ log.llm_calls_count or 0 }}</td></tr>
+      <tr><td>Response length</td><td>{{ log.response_length or 0 }} симв.</td></tr>
+    </tbody>
+  </table>
+
+  {% if log.llm_role_usage %}
+  <div class="section-title">LLM Role Usage</div>
+  <table>
+    <thead><tr><th>Роль</th><th>Вызовов</th></tr></thead>
+    <tbody>
+      {% for role, count in log.llm_role_usage.items() %}
+      <tr><td><span class="badge badge-info">{{ role }}</span></td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <div class="section-title">Tools & Modules</div>
+  <table>
+    <thead><tr><th>Тип</th><th>Список</th></tr></thead>
+    <tbody>
+      <tr><td>Tools called</td><td>{{ log.tools_called | join(', ') or '—' }}</td></tr>
+      <tr><td>Modules used</td><td>{{ log.modules_used | join(', ') or '—' }}</td></tr>
+    </tbody>
+  </table>
+
+  <div class="section-title">Ответ ассистента ({{ log.response_length or 0 }} символов)</div>
+  {% if log.response_text %}
+  <pre class="trace">{{ log.response_text }}</pre>
+  {% else %}
+  <p style="color:var(--pico-muted-color)">Нет текста ответа</p>
+  {% endif %}
+
+  {% if log.errors %}
+  <div class="section-title">Ошибки</div>
+  <div style="background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.3);border-radius:8px;padding:14px">
+    {% for err in log.errors %}
+    <div style="font-size:13px;color:#f85149;font-family:monospace;margin-bottom:6px">{{ err }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+<!-- Tab: Stage Trace -->
+<div id="tab-stage-trace" class="tab-pane">
+  {% if log.stage_trace %}
+  <div class="section-title">Waterfall — {{ log.total_duration_ms or 0 }} ms total</div>
+  {% for stage in log.stage_trace %}
+  <div class="waterfall-row">
+    <div class="waterfall-label">{{ stage.stage or stage.name or '?' }}</div>
+    <div class="waterfall-track">
+      <div class="waterfall-bar"
+           style="left:{{ stage.offset_pct }}%;width:{{ [stage.width_pct, 1]|max }}%"
+           title="{{ stage.duration_ms or 0 }} ms"></div>
+    </div>
+    <div class="waterfall-ms">{{ stage.duration_ms or 0 }} ms</div>
+  </div>
+  {% endfor %}
+
+  <div class="section-title" style="margin-top:28px">Таблица стадий</div>
+  <table>
+    <thead>
+      <tr><th>#</th><th>Стадия</th><th>Start (ms)</th><th>Duration (ms)</th><th>%</th></tr>
+    </thead>
+    <tbody>
+      {% for stage in log.stage_trace %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td><code>{{ stage.stage or stage.name or '?' }}</code></td>
+        <td>{{ stage.start_ms or 0 }}</td>
+        <td>{{ stage.duration_ms or 0 }}</td>
+        <td>{{ stage.width_pct or 0 }}%</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="color:var(--pico-muted-color);margin-top:16px">Stage trace недоступен для этого запроса.</p>
+  {% endif %}
+</div>
+
+<!-- Tab: LLM Calls -->
+<div id="tab-llm-calls" class="tab-pane">
+  {% if llm_calls %}
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Роль</th>
+        <th>Модель</th>
+        <th>Duration</th>
+        <th>Prompt len</th>
+        <th>Response len</th>
+        <th>Preview</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for call in llm_calls %}
+      <tr class="llm-call-row">
+        <td>{{ loop.index }}{% if call.iteration is not none %}<small style="color:var(--pico-muted-color)"> (iter {{ call.iteration }})</small>{% endif %}</td>
+        <td><span class="badge badge-info">{{ call.role }}</span></td>
+        <td style="font-size:12px">{{ call.model }}</td>
+        <td>{{ call.duration_ms or '—' }} ms</td>
+        <td>{{ call.prompt_length or 0 }}</td>
+        <td>{{ call.response_length or 0 }}</td>
+        <td class="truncate" style="max-width:200px;font-size:12px;color:var(--pico-muted-color)">{{ call.response_preview }}</td>
+        <td>
+          <button class="outline secondary expand-btn" onclick="toggleLLMCall('llm-{{ loop.index }}')">▼</button>
+        </td>
+      </tr>
+      <tr id="llm-{{ loop.index }}-row" style="display:none">
+        <td colspan="8">
+          <div class="llm-expand" style="display:block">
+            <div style="font-size:11px;color:var(--pico-muted-color);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Prompt</div>
+            <textarea readonly rows="6">{{ call.prompt }}</textarea>
+            <div style="font-size:11px;color:var(--pico-muted-color);text-transform:uppercase;letter-spacing:.04em;margin:10px 0 6px">Response</div>
+            <textarea readonly rows="4">{{ call.response }}</textarea>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="color:var(--pico-muted-color);margin-top:16px">LLM-вызовов для этого запроса не найдено.</p>
+  {% endif %}
+</div>
+
+<!-- Tab: Tool Results -->
+<div id="tab-tool-results" class="tab-pane">
+  {% if log.tools_called %}
+  <table>
+    <thead>
+      <tr><th>#</th><th>Tool</th><th>Из stage_trace</th></tr>
+    </thead>
+    <tbody>
+      {% for tool in log.tools_called %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td><code>{{ tool }}</code></td>
+        <td style="font-size:12px;color:var(--pico-muted-color)">
+          {% for stage in log.stage_trace if stage.stage == 'tool_executor' or stage.stage == tool %}
+            {{ stage.duration_ms or 0 }} ms
+          {% else %}
+            —
+          {% endfor %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p style="font-size:12px;color:var(--pico-muted-color);margin-top:12px">
+    Детальные args/result доступны в stage_trace при наличии tool-level записей.
+  </p>
+  {% else %}
+  <p style="color:var(--pico-muted-color);margin-top:16px">Tools не вызывались в этом запросе.</p>
+  {% endif %}
+</div>
+
+<!-- Tab: RAG Chunks -->
+<div id="tab-rag-chunks" class="tab-pane">
+  {% if log.rag_chunks_used %}
+  <table>
+    <thead>
+      <tr><th>#</th><th>Chunk ID</th><th>Category</th><th>Score</th></tr>
+    </thead>
+    <tbody>
+      {% for chunk in log.rag_chunks_used %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td>
+          {% if chunk is mapping %}
+          <code style="font-size:11px">{{ chunk.id or chunk.chunk_id or '—' }}</code>
+          {% else %}
+          <code style="font-size:11px">{{ chunk }}</code>
+          {% endif %}
+        </td>
+        <td>
+          {% if chunk is mapping %}
+          <span class="badge badge-info">{{ chunk.category or '—' }}</span>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          {% if chunk is mapping %}
+          {{ "%.3f"|format(chunk.score) if chunk.score is defined and chunk.score is not none else '—' }}
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="color:var(--pico-muted-color);margin-top:16px">RAG-чанки не использовались в этом запросе.</p>
+  {% endif %}
+</div>
+
+<div style="margin-top:28px">
   <a href="/admin/logs" role="button" class="secondary outline">← Назад к логам</a>
 </div>
+
+<script>
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+}
+function toggleLLMCall(id) {
+  const row = document.getElementById(id + '-row');
+  if (row) row.style.display = row.style.display === 'none' ? '' : 'none';
+}
+</script>
 {% endblock %}

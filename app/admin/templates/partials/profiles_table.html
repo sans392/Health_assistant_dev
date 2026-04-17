@@ -6,6 +6,7 @@
       <th>Имя</th>
       <th>Возраст</th>
       <th>Вес</th>
+      <th>Пол</th>
       <th>Уровень</th>
       <th>Цели</th>
       <th>Действия</th>
@@ -18,6 +19,7 @@
       <td>{{ p.name }}</td>
       <td>{{ p.age }} лет</td>
       <td>{{ p.weight_kg }} кг</td>
+      <td>{{ p.gender or '—' }}</td>
       <td><span class="badge badge-info">{{ p.experience_level }}</span></td>
       <td><small>{{ (p.training_goals or []) | join(', ') or '—' }}</small></td>
       <td>
@@ -29,20 +31,28 @@
   </tbody>
 </table>
 
-<!-- Edit profile modal (inline) -->
+<!-- Edit profile modal -->
 <dialog id="edit-profile-dialog">
-  <article>
+  <article style="max-width:600px;width:100%">
     <header>
       <button aria-label="Закрыть" rel="prev" onclick="document.getElementById('edit-profile-dialog').close()"></button>
       <h3>Редактировать профиль</h3>
     </header>
-    <form id="edit-profile-form">
+    <form id="edit-profile-form" onsubmit="return false">
       <input type="hidden" id="ep-id" name="id">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
         <div><label>Имя</label><input type="text" id="ep-name" name="name"></div>
         <div><label>Возраст</label><input type="number" id="ep-age" name="age"></div>
         <div><label>Вес (кг)</label><input type="number" step="0.1" id="ep-weight" name="weight_kg"></div>
         <div><label>Рост (см)</label><input type="number" step="0.1" id="ep-height" name="height_cm"></div>
+        <div>
+          <label>Пол</label>
+          <select id="ep-gender" name="gender">
+            <option value="">—</option>
+            <option value="male">male</option>
+            <option value="female">female</option>
+          </select>
+        </div>
         <div>
           <label>Уровень</label>
           <select id="ep-level" name="experience_level">
@@ -52,52 +62,138 @@
           </select>
         </div>
         <div><label>Макс. ЧСС</label><input type="number" id="ep-max-hr" name="max_heart_rate"></div>
+        <div><label>ЧСС покоя</label><input type="number" id="ep-rhr" name="resting_heart_rate"></div>
+      </div>
+      <div style="margin-top:12px">
+        <label>Цели (JSON-массив, напр. ["похудение", "сила"])</label>
+        <textarea id="ep-goals" name="training_goals" rows="2" style="font-family:monospace;font-size:13px"></textarea>
+      </div>
+      <div style="margin-top:12px">
+        <label>Травмы (JSON-массив)</label>
+        <textarea id="ep-injuries" name="injuries" rows="2" style="font-family:monospace;font-size:13px"></textarea>
+      </div>
+      <div style="margin-top:12px">
+        <label>Хронические заболевания (JSON-массив)</label>
+        <textarea id="ep-chronic" name="chronic_conditions" rows="2" style="font-family:monospace;font-size:13px"></textarea>
+      </div>
+      <div style="margin-top:12px">
+        <label>Предпочитаемые виды спорта (JSON-массив)</label>
+        <textarea id="ep-sports" name="preferred_sports" rows="2" style="font-family:monospace;font-size:13px"></textarea>
       </div>
     </form>
     <footer>
       <button onclick="document.getElementById('edit-profile-dialog').close()" class="secondary outline">Отмена</button>
-      <button onclick="saveProfile()">Сохранить</button>
+      <button id="ep-save-btn" onclick="saveProfile()">Сохранить</button>
     </footer>
-    <div id="ep-result" style="margin-top:12px;display:none"></div>
+    <div id="ep-result" style="margin-top:12px;display:none;padding:8px 12px;border-radius:6px;font-size:13px"></div>
   </article>
 </dialog>
 
 <script>
-function openEditProfile(id, profile) {
-  document.getElementById('ep-id').value = id;
-  document.getElementById('ep-name').value = profile.name || '';
-  document.getElementById('ep-age').value = profile.age || '';
-  document.getElementById('ep-weight').value = profile.weight_kg || '';
-  document.getElementById('ep-height').value = profile.height_cm || '';
-  document.getElementById('ep-level').value = profile.experience_level || 'beginner';
-  document.getElementById('ep-max-hr').value = profile.max_heart_rate || '';
-  document.getElementById('ep-result').style.display = 'none';
-  document.getElementById('edit-profile-dialog').showModal();
-}
-async function saveProfile() {
-  const id = document.getElementById('ep-id').value;
-  const payload = {
-    name: document.getElementById('ep-name').value,
-    age: parseInt(document.getElementById('ep-age').value) || 0,
-    weight_kg: parseFloat(document.getElementById('ep-weight').value) || 0,
-    height_cm: parseFloat(document.getElementById('ep-height').value) || 0,
-    experience_level: document.getElementById('ep-level').value,
-    max_heart_rate: parseInt(document.getElementById('ep-max-hr').value) || null,
+(function() {
+  const ADMIN_USER = {{ admin_user | tojson }};
+  const ADMIN_PASS = {{ admin_pass | tojson }};
+
+  window.openEditProfile = function(id, profile) {
+    document.getElementById('ep-id').value = id;
+    document.getElementById('ep-name').value = profile.name || '';
+    document.getElementById('ep-age').value = profile.age || '';
+    document.getElementById('ep-weight').value = profile.weight_kg || '';
+    document.getElementById('ep-height').value = profile.height_cm || '';
+    document.getElementById('ep-gender').value = profile.gender || '';
+    document.getElementById('ep-level').value = profile.experience_level || 'beginner';
+    document.getElementById('ep-max-hr').value = profile.max_heart_rate || '';
+    document.getElementById('ep-rhr').value = profile.resting_heart_rate || '';
+    document.getElementById('ep-goals').value = JSON.stringify(profile.training_goals || []);
+    document.getElementById('ep-injuries').value = JSON.stringify(profile.injuries || []);
+    document.getElementById('ep-chronic').value = JSON.stringify(profile.chronic_conditions || []);
+    document.getElementById('ep-sports').value = JSON.stringify(profile.preferred_sports || []);
+    const res = document.getElementById('ep-result');
+    res.style.display = 'none';
+    res.textContent = '';
+    document.getElementById('edit-profile-dialog').showModal();
   };
-  const res = await fetch(`/api/admin/profiles/${id}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Basic ' + btoa('admin:admin') },
-    body: JSON.stringify(payload),
-  });
-  const resultEl = document.getElementById('ep-result');
-  resultEl.style.display = 'block';
-  if (res.ok) {
-    resultEl.innerHTML = '<span style="color:#3fb950">✓ Сохранено</span>';
-    setTimeout(() => { document.getElementById('edit-profile-dialog').close(); location.reload(); }, 1000);
-  } else {
-    resultEl.innerHTML = '<span style="color:#f85149">Ошибка сохранения</span>';
+
+  window.saveProfile = async function() {
+    const id = document.getElementById('ep-id').value;
+    const btn = document.getElementById('ep-save-btn');
+    const resultEl = document.getElementById('ep-result');
+
+    // Валидация JSON-полей на клиенте
+    const jsonFields = ['ep-goals', 'ep-injuries', 'ep-chronic', 'ep-sports'];
+    const jsonNames = {
+      'ep-goals': 'training_goals',
+      'ep-injuries': 'injuries',
+      'ep-chronic': 'chronic_conditions',
+      'ep-sports': 'preferred_sports',
+    };
+    for (const fid of jsonFields) {
+      const val = document.getElementById(fid).value.trim();
+      if (val) {
+        try { JSON.parse(val); }
+        catch(e) {
+          showResult('error', 'Поле "' + jsonNames[fid] + '" содержит невалидный JSON: ' + e.message);
+          return;
+        }
+      }
+    }
+
+    const payload = {
+      name: document.getElementById('ep-name').value,
+      age: parseInt(document.getElementById('ep-age').value) || null,
+      weight_kg: parseFloat(document.getElementById('ep-weight').value) || null,
+      height_cm: parseFloat(document.getElementById('ep-height').value) || null,
+      gender: document.getElementById('ep-gender').value || null,
+      experience_level: document.getElementById('ep-level').value,
+      max_heart_rate: parseInt(document.getElementById('ep-max-hr').value) || null,
+      resting_heart_rate: parseInt(document.getElementById('ep-rhr').value) || null,
+      training_goals: document.getElementById('ep-goals').value.trim(),
+      injuries: document.getElementById('ep-injuries').value.trim(),
+      chronic_conditions: document.getElementById('ep-chronic').value.trim(),
+      preferred_sports: document.getElementById('ep-sports').value.trim(),
+    };
+
+    btn.disabled = true;
+    btn.textContent = 'Сохранение…';
+    try {
+      const res = await fetch(`/api/admin/profiles/${id}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Basic ' + btoa(ADMIN_USER + ':' + ADMIN_PASS),
+        },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) {
+        showResult('ok', '✓ Профиль сохранён');
+        setTimeout(() => { document.getElementById('edit-profile-dialog').close(); location.reload(); }, 900);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        showResult('error', 'Ошибка: ' + (data.detail || res.status));
+      }
+    } catch(e) {
+      showResult('error', 'Сетевая ошибка: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Сохранить';
+    }
+  };
+
+  function showResult(type, msg) {
+    const el = document.getElementById('ep-result');
+    el.style.display = 'block';
+    if (type === 'ok') {
+      el.style.background = 'rgba(63,185,80,.15)';
+      el.style.color = '#3fb950';
+      el.style.border = '1px solid rgba(63,185,80,.3)';
+    } else {
+      el.style.background = 'rgba(248,81,73,.1)';
+      el.style.color = '#f85149';
+      el.style.border = '1px solid rgba(248,81,73,.3)';
+    }
+    el.textContent = msg;
   }
-}
+})();
 </script>
 {% else %}
 <p style="color:var(--pico-muted-color);margin-top:16px">Профили не найдены.</p>
