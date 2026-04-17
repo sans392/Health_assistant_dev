@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.services.llm_call_logger import llm_call_logger
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +44,12 @@ class OllamaClient:
         host: str | None = None,
         model: str | None = None,
         timeout: int | None = None,
+        role: str = "response",
     ) -> None:
         self._host = (host or settings.ollama_host).rstrip("/")
         self._model = model or settings.ollama_model
         self._timeout = timeout or settings.ollama_timeout
+        self._role = role
 
     @property
     def model(self) -> str:
@@ -187,6 +190,16 @@ class OllamaClient:
             prompt_length,
             response_length,
             duration_ms,
+        )
+
+        llm_call_logger.record(
+            role=self._role,
+            model=self._model,
+            prompt=prompt_for_log[:4096] if prompt_for_log else None,
+            response=content[:4096] if content else None,
+            prompt_length=prompt_length,
+            response_length=response_length,
+            duration_ms=int(duration_ms),
         )
 
         return LLMResponse(

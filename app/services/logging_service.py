@@ -114,7 +114,8 @@ class LoggingService:
         Returns:
             request_id — уникальный идентификатор лога.
         """
-        request_id = request_id or str(uuid.uuid4())
+        # Используем request_id из результата пайплайна если он уже сгенерирован
+        request_id = request_id or getattr(result, "request_id", None) or str(uuid.uuid4())
 
         # 1. Запись в SQLite
         await self._write_to_db(
@@ -159,6 +160,8 @@ class LoggingService:
                 response_length=len(result.response_text),
                 errors=result.errors if result.errors else None,
                 response_text=result.response_text,
+                stage_trace=getattr(result, "stage_trace", None) or None,
+                llm_role_usage=getattr(result, "llm_role_usage", None) or None,
             )
             db.add(log_entry)
             await db.commit()

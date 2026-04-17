@@ -105,6 +105,7 @@ class LLMRegistry:
                 host=settings.ollama_host,
                 model=model,
                 timeout=timeout,
+                role=role,
             )
         return self._clients[role]
 
