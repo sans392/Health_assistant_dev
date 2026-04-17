@@ -8,6 +8,7 @@ from app.models.pipeline_log import PipelineLog
 from app.models.llm_role_config import LLMRoleConfig
 from app.models.llm_call import LLMCall
 from app.models.rag_chunk import RAGChunk
+from app.models.seed_run import SeedRun
 
 __all__ = [
     "UserProfile",
@@ -19,4 +20,5 @@ __all__ = [
     "LLMRoleConfig",
     "LLMCall",
     "RAGChunk",
+    "SeedRun",
 ]

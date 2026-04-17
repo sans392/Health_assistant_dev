@@ -13,13 +13,13 @@ Admin API (issue #14):
   GET  /api/admin/daily-facts      — дневные метрики
   GET  /api/admin/profiles         — профили пользователей
   PUT  /api/admin/profiles/{id}    — редактирование профиля
-  POST /api/admin/seed             — пересоздание seed data
+  POST /api/admin/seed             — запуск SeedGenerator с параметрами (issue #33)
+  POST /api/admin/seed/preview     — предпросмотр нескольких записей без записи (issue #33)
+  GET  /api/admin/seed/runs        — журнал запусков SeedGenerator (issue #33)
   POST /api/admin/test-llm         — тест промпта через Ollama
 """
 
 import secrets
-import subprocess
-import sys
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -520,31 +520,165 @@ async def get_chat_session_messages(
 
 
 # ---------------------------------------------------------------------------
-# Agent Control — seed data, test LLM
+# Seed Generator v2 (Issue #33)
 # ---------------------------------------------------------------------------
 
 @router.post("/seed", dependencies=[Depends(_require_admin)])
-async def run_seed() -> dict[str, str]:
-    """Пересоздать seed данные (запускает scripts/seed_data.py)."""
+async def run_seed(
+    payload: dict[str, Any] = Body(default={}),
+    credentials: HTTPBasicCredentials = Depends(_security),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Запустить SeedGenerator с параметрами.
+
+    Body (все поля опциональны):
+      scenario: normal_load | overreaching | recovery_phase | injury_recovery
+      profile_preset: beginner | intermediate | advanced
+      days: int (1–365)
+      user_count: int (1–10)
+      add_anomalies: bool
+      missing_data_rate: float 0–1
+      truncate_before: bool
+    """
+    import asyncio
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session as SyncSession
+    from scripts.seed_data import SeedGenerator
+    from app.models.seed_run import SeedRun
+
+    days = int(payload.get("days", 30))
+    user_count = int(payload.get("user_count", 1))
+    scenario = payload.get("scenario", "normal_load")
+    profile_preset = payload.get("profile_preset", "intermediate")
+    add_anomalies = bool(payload.get("add_anomalies", False))
+    missing_data_rate = float(payload.get("missing_data_rate", 0.0))
+    truncate_before = bool(payload.get("truncate_before", False))
+
+    # Валидация
+    valid_scenarios = {"normal_load", "overreaching", "recovery_phase", "injury_recovery"}
+    valid_profiles = {"beginner", "intermediate", "advanced"}
+    if scenario not in valid_scenarios:
+        raise HTTPException(status_code=400, detail=f"Неверный scenario: {scenario}")
+    if profile_preset not in valid_profiles:
+        raise HTTPException(status_code=400, detail=f"Неверный profile_preset: {profile_preset}")
+    days = max(1, min(365, days))
+    user_count = max(1, min(10, user_count))
+
+    gen = SeedGenerator(
+        days=days,
+        user_count=user_count,
+        profile_preset=profile_preset,
+        scenario=scenario,
+        add_anomalies=add_anomalies,
+        missing_data_rate=missing_data_rate,
+        truncate_before=truncate_before,
+    )
+
     try:
-        proc = subprocess.run(
-            [sys.executable, "scripts/seed_data.py"],
-            capture_output=True,
-            text=True,
-            timeout=120,
+        sync_engine = create_engine(
+            settings.database_url_sync,
+            connect_args={"check_same_thread": False},
         )
-        if proc.returncode == 0:
-            return {"status": "ok", "output": proc.stdout[-2000:] if proc.stdout else ""}
-        else:
-            return {
-                "status": "error",
-                "output": proc.stdout[-1000:],
-                "error": proc.stderr[-1000:],
-            }
-    except subprocess.TimeoutExpired:
-        return {"status": "error", "output": "", "error": "Timeout (120s)"}
+
+        def _run_sync() -> dict[str, Any]:
+            with SyncSession(sync_engine) as session:
+                result = gen.generate(session)
+                return {
+                    "profiles_created": result.profiles_created,
+                    "activities_created": result.activities_created,
+                    "daily_facts_created": result.daily_facts_created,
+                    "users": result.users,
+                }
+
+        loop = asyncio.get_event_loop()
+        counts = await loop.run_in_executor(None, _run_sync)
     except Exception as exc:
-        return {"status": "error", "output": "", "error": str(exc)}
+        return {"status": "error", "error": str(exc)}
+    finally:
+        try:
+            sync_engine.dispose()
+        except Exception:
+            pass
+
+    # Запись в журнал
+    params_stored = {
+        "scenario": scenario,
+        "profile_preset": profile_preset,
+        "days": days,
+        "user_count": user_count,
+        "add_anomalies": add_anomalies,
+        "missing_data_rate": missing_data_rate,
+        "truncate_before": truncate_before,
+    }
+    run_record = SeedRun(
+        params=params_stored,
+        admin_user=credentials.username,
+        records_created=counts,
+    )
+    db.add(run_record)
+    await db.commit()
+
+    return {"status": "ok", **counts}
+
+
+@router.post("/seed/preview", dependencies=[Depends(_require_admin)])
+async def preview_seed(
+    payload: dict[str, Any] = Body(default={}),
+) -> dict[str, Any]:
+    """Предпросмотр: ~5 записей без записи в БД.
+
+    Body — те же поля, что и для /seed.
+    """
+    from scripts.seed_data import SeedGenerator
+
+    days = max(1, min(365, int(payload.get("days", 30))))
+    scenario = payload.get("scenario", "normal_load")
+    profile_preset = payload.get("profile_preset", "intermediate")
+    add_anomalies = bool(payload.get("add_anomalies", False))
+    missing_data_rate = float(payload.get("missing_data_rate", 0.0))
+
+    valid_scenarios = {"normal_load", "overreaching", "recovery_phase", "injury_recovery"}
+    valid_profiles = {"beginner", "intermediate", "advanced"}
+    if scenario not in valid_scenarios:
+        raise HTTPException(status_code=400, detail=f"Неверный scenario: {scenario}")
+    if profile_preset not in valid_profiles:
+        raise HTTPException(status_code=400, detail=f"Неверный profile_preset: {profile_preset}")
+
+    gen = SeedGenerator(
+        days=days,
+        scenario=scenario,
+        profile_preset=profile_preset,
+        add_anomalies=add_anomalies,
+        missing_data_rate=missing_data_rate,
+    )
+    return gen.preview(count=5)
+
+
+@router.get("/seed/runs", dependencies=[Depends(_require_admin)])
+async def list_seed_runs(
+    limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Журнал запусков SeedGenerator."""
+    from app.models.seed_run import SeedRun
+
+    runs = (await db.execute(
+        select(SeedRun).order_by(SeedRun.created_at.desc()).limit(limit)
+    )).scalars().all()
+
+    return {
+        "total": len(runs),
+        "items": [
+            {
+                "id": r.id,
+                "params": r.params,
+                "records_created": r.records_created,
+                "admin_user": r.admin_user,
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in runs
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------

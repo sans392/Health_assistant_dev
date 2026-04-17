@@ -563,6 +563,41 @@ async def data_session_messages(
 
 
 # ---------------------------------------------------------------------------
+# Seed Generator v2 (Issue #33)
+# ---------------------------------------------------------------------------
+
+@router.get("/admin/seed", response_class=HTMLResponse, dependencies=[Depends(_require_admin)])
+async def admin_seed(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> HTMLResponse:
+    """Страница управления Seed Generator v2."""
+    from app.models.seed_run import SeedRun
+
+    runs = (await db.execute(
+        select(SeedRun).order_by(SeedRun.created_at.desc()).limit(20)
+    )).scalars().all()
+
+    def run_dict(r: SeedRun) -> dict:
+        return {
+            "id": r.id,
+            "params": r.params,
+            "records_created": r.records_created,
+            "admin_user": r.admin_user,
+            "created_at": r.created_at.isoformat(),
+        }
+
+    return templates.TemplateResponse(
+        "seed.html",
+        {
+            "request": request,
+            **_base_ctx("seed"),
+            "recent_runs": [run_dict(r) for r in runs],
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Agent Control
 # ---------------------------------------------------------------------------
 
