@@ -25,6 +25,7 @@ from app.services.data_processing.trend_analyzer import (
     analyze_trend,
     build_time_series_from_activities,
 )
+from app.services.llm_registry import llm_registry
 from app.services.llm_service import ollama_client
 
 logger = logging.getLogger(__name__)
@@ -157,8 +158,16 @@ class PipelineOrchestrator:
             db=db,
         )
 
-        # 2. Intent Detection — определяем намерение (синхронный)
-        intent_result = self._intent_detector.detect(raw_query)
+        # 2. Intent Detection — stage 1 (rule-based) + stage 2 LLM при низкой уверенности
+        history = [
+            {"role": msg.role, "content": msg.content}
+            for msg in enriched.conversation_history[-3:]
+        ] if enriched.conversation_history else []
+        intent_result = await self._intent_detector.detect(
+            raw_query,
+            llm_registry=llm_registry,
+            history=history,
+        )
 
         # 3. Safety Check — проверяем безопасность (синхронный)
         safety_result = self._safety_checker.check(raw_query)

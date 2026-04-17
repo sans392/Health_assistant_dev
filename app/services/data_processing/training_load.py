@@ -1,9 +1,11 @@
 """Модуль расчёта тренировочной нагрузки (training_load).
 
+Phase 2 расширения: monotony, strain_weekly, load_warning.
 MVP-формула: load = duration_seconds × sport_coefficient + calories × 0.1
 Acute/chronic ratio: нагрузка последних 7 дней / нагрузка предыдущих 7 дней.
 """
 
+import statistics
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
@@ -29,10 +31,13 @@ _DEFAULT_COEFFICIENT = 1.0
 class TrainingLoad:
     """Результат расчёта тренировочной нагрузки."""
 
-    daily_load: dict[str, float] = field(default_factory=dict)   # дата → нагрузка
-    weekly_load: float = 0.0                                      # сумма за последние 7 дней
-    chronic_load: float = 0.0                                     # сумма предыдущих 7 дней
-    acute_chronic_ratio: float = 0.0                              # weekly / chronic
+    daily_load: dict[str, float] = field(default_factory=dict)  # дата → нагрузка
+    weekly_load: float = 0.0                # сумма за последние 7 дней (acute)
+    chronic_load: float = 0.0              # сумма предыдущих 7 дней
+    acute_chronic_ratio: float = 0.0       # weekly / chronic
+    monotony: float = 0.0                  # avg / stdev дневной нагрузки за 7 дней
+    strain_weekly: float = 0.0             # weekly_load × monotony
+    load_warning: str | None = None        # предупреждение при отклонении ratio
 
 
 def _activity_load(activity: dict) -> float:
@@ -48,16 +53,15 @@ def compute_training_load(
     activities: list[dict],
     reference_date: date | None = None,
 ) -> TrainingLoad:
-    """Вычислить тренировочную нагрузку и acute/chronic ratio.
-
-    Использует MVP-формулу без TRIMP (нет HR-данных в activities).
+    """Вычислить тренировочную нагрузку, monotony и acute/chronic ratio.
 
     Args:
         activities: Список словарей активностей (из get_activities).
         reference_date: Дата «сегодня» (по умолчанию date.today()).
 
     Returns:
-        TrainingLoad с дневной нагрузкой и соотношением acute/chronic.
+        TrainingLoad с дневной нагрузкой, соотношением acute/chronic,
+        monotony, strain_weekly и load_warning.
     """
     if not activities:
         return TrainingLoad()
@@ -91,12 +95,43 @@ def compute_training_load(
         if chronic_start <= date.fromisoformat(d_str) <= chronic_end
     )
 
-    # Acute/chronic ratio (избегаем деления на 0)
+    # Acute/chronic ratio
     ratio = round(weekly_load / chronic_load, 2) if chronic_load > 0 else 0.0
+
+    # Monotony: avg(daily_load) / stdev(daily_load) за последние 7 дней
+    acute_daily_loads = [
+        daily_load.get((today - timedelta(days=i)).isoformat(), 0.0)
+        for i in range(7)
+    ]
+    non_zero = [x for x in acute_daily_loads if x > 0]
+    if len(non_zero) >= 2:
+        try:
+            avg = statistics.mean(non_zero)
+            std = statistics.stdev(non_zero)
+            monotony = round(avg / std, 2) if std > 0 else 0.0
+        except statistics.StatisticsError:
+            monotony = 0.0
+    else:
+        monotony = 0.0
+
+    strain_weekly = round(weekly_load * monotony, 1)
+
+    # Load warning
+    if ratio > 1.5:
+        load_warning = (
+            f"Острая нагрузка превышает хроническую в {ratio}x — риск перетренированности"
+        )
+    elif 0 < ratio < 0.8:
+        load_warning = f"Нагрузка ниже нормы (acute/chronic ratio={ratio})"
+    else:
+        load_warning = None
 
     return TrainingLoad(
         daily_load={k: round(v, 1) for k, v in daily_load.items()},
         weekly_load=round(weekly_load, 1),
         chronic_load=round(chronic_load, 1),
         acute_chronic_ratio=ratio,
+        monotony=monotony,
+        strain_weekly=strain_weekly,
+        load_warning=load_warning,
     )

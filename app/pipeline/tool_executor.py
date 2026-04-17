@@ -6,7 +6,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -171,6 +171,17 @@ class ToolExecutor:
                 top_k=top_k,
             )
 
+        if tool_name == "compute_recovery":
+            return await self._compute_recovery(user_id=user_id, db=db)
+
+        if tool_name == "compute_strain":
+            return await self._compute_strain(
+                user_id=user_id, db=db, reference_date=date_to
+            )
+
+        if tool_name == "check_overtraining":
+            return await self._check_overtraining(user_id=user_id, db=db)
+
         # log_activity и update_profile вызываются через execute_action (запись)
         logger.warning("ToolExecutor: неизвестный tool '%s'", tool_name)
         return ToolResult(
@@ -178,6 +189,84 @@ class ToolExecutor:
             success=False,
             data=None,
             error=f"Неизвестный tool: {tool_name}",
+        )
+
+    async def _compute_recovery(
+        self, user_id: str, db: AsyncSession
+    ) -> ToolResult:
+        """Рассчитать recovery score за последние 14 дней."""
+        import dataclasses
+        from app.services.data_processing.recovery_score import compute_recovery_score
+
+        today = date.today()
+        facts_res = await get_daily_facts(
+            db=db, user_id=user_id,
+            date_from=today - timedelta(days=13),
+            date_to=today,
+        )
+        acts_res = await get_activities(
+            db=db, user_id=user_id,
+            date_from=today - timedelta(days=27),
+            date_to=today,
+        )
+        result = compute_recovery_score(
+            daily_facts=facts_res.data or [],
+            activities=acts_res.data or [],
+        )
+        return ToolResult(
+            tool_name="compute_recovery",
+            success=True,
+            data=dataclasses.asdict(result),
+        )
+
+    async def _compute_strain(
+        self, user_id: str, db: AsyncSession, reference_date: date
+    ) -> ToolResult:
+        """Рассчитать Strain Score за указанный день."""
+        import dataclasses
+        from app.services.data_processing.strain_score import compute_strain_score
+
+        acts_res = await get_activities(
+            db=db, user_id=user_id,
+            date_from=reference_date,
+            date_to=reference_date,
+        )
+        result = compute_strain_score(
+            activities=acts_res.data or [],
+            reference_date=reference_date,
+        )
+        return ToolResult(
+            tool_name="compute_strain",
+            success=True,
+            data=dataclasses.asdict(result),
+        )
+
+    async def _check_overtraining(
+        self, user_id: str, db: AsyncSession
+    ) -> ToolResult:
+        """Проверить маркеры перетренированности за последние 14 дней."""
+        import dataclasses
+        from app.services.data_processing.overtraining_detection import detect_overtraining
+
+        today = date.today()
+        facts_res = await get_daily_facts(
+            db=db, user_id=user_id,
+            date_from=today - timedelta(days=13),
+            date_to=today,
+        )
+        acts_res = await get_activities(
+            db=db, user_id=user_id,
+            date_from=today - timedelta(days=27),
+            date_to=today,
+        )
+        result = detect_overtraining(
+            daily_facts=facts_res.data or [],
+            activities=acts_res.data or [],
+        )
+        return ToolResult(
+            tool_name="check_overtraining",
+            success=True,
+            data=dataclasses.asdict(result),
         )
 
     async def execute_action(
