@@ -1,8 +1,10 @@
-"""Тесты для модуля определения намерений (IntentDetector)."""
+"""Тесты для модуля определения намерений (IntentDetector) — Phase 2."""
+
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.pipeline.intent_detection import IntentDetector, IntentResult
+from app.pipeline.intent_detection import IntentDetector, IntentResult, _parse_llm_json
 
 
 @pytest.fixture
@@ -10,127 +12,341 @@ def detector() -> IntentDetector:
     return IntentDetector()
 
 
+# ---------------------------------------------------------------------------
+# Классификация намерений (rule-based, теперь async)
+# ---------------------------------------------------------------------------
+
 class TestIntentClassification:
     """Тесты классификации намерений."""
 
-    def test_data_retrieval_show_workouts(self, detector: IntentDetector) -> None:
-        result = detector.detect("Покажи тренировки за неделю")
+    @pytest.mark.asyncio
+    async def test_data_retrieval_show_workouts(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Покажи тренировки за неделю")
         assert result.intent == "data_retrieval"
         assert result.confidence >= 0.85
 
-    def test_data_retrieval_give_activities(self, detector: IntentDetector) -> None:
-        result = detector.detect("Дай историю занятий")
+    @pytest.mark.asyncio
+    async def test_data_retrieval_give_activities(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Дай историю занятий")
         assert result.intent == "data_retrieval"
         assert result.confidence >= 0.85
 
-    def test_plan_request_create(self, detector: IntentDetector) -> None:
-        result = detector.detect("Составь план тренировок на месяц")
+    @pytest.mark.asyncio
+    async def test_plan_request_create(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Составь план тренировок на месяц")
         assert result.intent == "plan_request"
         assert result.confidence >= 0.85
 
-    def test_plan_request_make_program(self, detector: IntentDetector) -> None:
-        result = detector.detect("Сделай программу тренировок")
+    @pytest.mark.asyncio
+    async def test_plan_request_make_program(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Сделай программу тренировок")
         assert result.intent == "plan_request"
         assert result.confidence >= 0.85
 
-    def test_health_concern_knee_pain(self, detector: IntentDetector) -> None:
-        result = detector.detect("Болит колено после приседаний")
+    @pytest.mark.asyncio
+    async def test_health_concern_knee_pain(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Болит колено после приседаний")
         assert result.intent == "health_concern"
         assert result.confidence >= 0.9
 
-    def test_health_concern_discomfort(self, detector: IntentDetector) -> None:
-        result = detector.detect("Чувствую дискомфорт в пояснице")
+    @pytest.mark.asyncio
+    async def test_health_concern_discomfort(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Чувствую дискомфорт в пояснице")
         assert result.intent == "health_concern"
         assert result.confidence >= 0.9
 
-    def test_direct_question_pulse(self, detector: IntentDetector) -> None:
-        result = detector.detect("Какой у меня пульс?")
+    @pytest.mark.asyncio
+    async def test_direct_question_pulse(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Какой у меня пульс?")
         assert result.intent == "direct_question"
         assert result.confidence >= 0.8
 
-    def test_direct_question_weight(self, detector: IntentDetector) -> None:
-        result = detector.detect("Сколько я вешу?")
+    @pytest.mark.asyncio
+    async def test_direct_question_weight(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Сколько я вешу?")
         assert result.intent == "direct_question"
         assert result.confidence >= 0.8
 
-    def test_data_analysis_progress(self, detector: IntentDetector) -> None:
-        result = detector.detect("Проанализируй прогресс в беге")
+    @pytest.mark.asyncio
+    async def test_data_analysis_progress(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Проанализируй прогресс в беге")
         assert result.intent == "data_analysis"
         assert result.confidence >= 0.85
 
-    def test_data_analysis_trend(self, detector: IntentDetector) -> None:
-        result = detector.detect("Покажи динамику моих тренировок")
+    @pytest.mark.asyncio
+    async def test_data_analysis_trend(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Покажи динамику моих тренировок")
         assert result.intent == "data_analysis"
         assert result.confidence >= 0.85
 
-    def test_general_chat_hello(self, detector: IntentDetector) -> None:
-        result = detector.detect("Привет!")
+    @pytest.mark.asyncio
+    async def test_general_chat_hello(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Привет!")
         assert result.intent == "general_chat"
         assert result.confidence >= 0.9
 
-    def test_general_chat_thanks(self, detector: IntentDetector) -> None:
-        result = detector.detect("Спасибо")
+    @pytest.mark.asyncio
+    async def test_general_chat_thanks(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Спасибо")
         assert result.intent == "general_chat"
         assert result.confidence >= 0.9
 
-    def test_fallback_unclear_query(self, detector: IntentDetector) -> None:
-        result = detector.detect("хм")
+    @pytest.mark.asyncio
+    async def test_fallback_unclear_query(self, detector: IntentDetector) -> None:
+        result = await detector.detect("хм")
         assert result.intent == "general_chat"
         assert result.confidence < 0.5
 
-    def test_result_has_raw_query(self, detector: IntentDetector) -> None:
+    @pytest.mark.asyncio
+    async def test_result_has_raw_query(self, detector: IntentDetector) -> None:
         query = "Покажи тренировки за неделю"
-        result = detector.detect(query)
+        result = await detector.detect(query)
         assert result.raw_query == query
 
+
+# ---------------------------------------------------------------------------
+# Извлечение сущностей (расширенный Phase 2)
+# ---------------------------------------------------------------------------
 
 class TestEntityExtraction:
     """Тесты извлечения сущностей."""
 
-    def test_time_range_today(self, detector: IntentDetector) -> None:
-        result = detector.detect("Покажи активность за сегодня")
+    @pytest.mark.asyncio
+    async def test_time_range_today(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Покажи активность за сегодня")
         assert result.entities.get("time_range") == "сегодня"
 
-    def test_time_range_yesterday(self, detector: IntentDetector) -> None:
-        result = detector.detect("Какие тренировки были вчера?")
+    @pytest.mark.asyncio
+    async def test_time_range_yesterday(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Какие тренировки были вчера?")
         assert result.entities.get("time_range") == "вчера"
 
-    def test_time_range_week(self, detector: IntentDetector) -> None:
-        result = detector.detect("Покажи тренировки за неделю")
+    @pytest.mark.asyncio
+    async def test_time_range_week(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Покажи тренировки за неделю")
         assert result.entities.get("time_range") == "за неделю"
 
-    def test_time_range_month(self, detector: IntentDetector) -> None:
-        result = detector.detect("Статистика за месяц")
+    @pytest.mark.asyncio
+    async def test_time_range_month(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Статистика за месяц")
         assert result.entities.get("time_range") == "за месяц"
 
-    def test_sport_running(self, detector: IntentDetector) -> None:
-        result = detector.detect("Проанализируй мой бег")
+    @pytest.mark.asyncio
+    async def test_sport_running(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Проанализируй мой бег")
         assert result.entities.get("sport_type") == "running"
 
-    def test_sport_cycling(self, detector: IntentDetector) -> None:
-        result = detector.detect("Покажи тренировки на велосипеде")
+    @pytest.mark.asyncio
+    async def test_sport_cycling(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Покажи тренировки на велосипеде")
         assert result.entities.get("sport_type") == "cycling"
 
-    def test_sport_swimming(self, detector: IntentDetector) -> None:
-        result = detector.detect("Сколько раз я плавал?")
+    @pytest.mark.asyncio
+    async def test_sport_swimming(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Сколько раз я плавал?")
         assert result.entities.get("sport_type") == "swimming"
 
-    def test_sport_gym(self, detector: IntentDetector) -> None:
-        result = detector.detect("Сколько раз я ходил в зал?")
+    @pytest.mark.asyncio
+    async def test_sport_gym(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Сколько раз я ходил в зал?")
         assert result.entities.get("sport_type") == "gym"
 
-    def test_metric_pulse(self, detector: IntentDetector) -> None:
-        result = detector.detect("Какой у меня пульс?")
-        assert result.entities.get("metric") == "пульс"
+    @pytest.mark.asyncio
+    async def test_metric_pulse(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Какой у меня пульс?")
+        assert result.entities.get("metric") == "heart_rate"
 
-    def test_metric_weight(self, detector: IntentDetector) -> None:
-        result = detector.detect("Сколько я вешу?")
+    @pytest.mark.asyncio
+    async def test_metric_weight(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Сколько я вешу?")
         assert result.entities.get("metric") == "вес"
 
-    def test_metric_calories(self, detector: IntentDetector) -> None:
-        result = detector.detect("Сколько калорий я сжёг?")
+    @pytest.mark.asyncio
+    async def test_metric_calories(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Сколько калорий я сжёг?")
         assert result.entities.get("metric") == "калории"
 
-    def test_no_entities_general_chat(self, detector: IntentDetector) -> None:
-        result = detector.detect("Привет!")
+    @pytest.mark.asyncio
+    async def test_metric_hrv(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Какой у меня HRV?")
+        assert result.entities.get("metric") == "hrv"
+
+    @pytest.mark.asyncio
+    async def test_metric_sleep(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Как я сплю последнюю неделю?")
+        assert result.entities.get("metric") == "сон"
+
+    @pytest.mark.asyncio
+    async def test_body_part_knee(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Болит колено после пробежки")
+        assert result.entities.get("body_part") == "колено"
+
+    @pytest.mark.asyncio
+    async def test_body_part_back(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Болит спина после тренировки")
+        assert result.entities.get("body_part") == "спина"
+
+    @pytest.mark.asyncio
+    async def test_intensity_heavy(self, detector: IntentDetector) -> None:
+        result = await detector.detect("После тяжёлой тренировки болит всё тело")
+        assert result.entities.get("intensity") == "тяжело"
+
+    @pytest.mark.asyncio
+    async def test_no_entities_general_chat(self, detector: IntentDetector) -> None:
+        result = await detector.detect("Привет!")
         assert result.entities == {}
+
+
+# ---------------------------------------------------------------------------
+# LLM stage 2 — fallback поведение
+# ---------------------------------------------------------------------------
+
+class TestLLMStage:
+    """Тесты LLM stage 2 (LLM fallback при низкой уверенности)."""
+
+    def _make_registry(self, json_response: str) -> MagicMock:
+        """Создать mock LLMRegistry, возвращающий заданный JSON."""
+        llm_response = MagicMock()
+        llm_response.content = json_response
+        llm_response.model = "test-model"
+
+        client = AsyncMock()
+        client.generate = AsyncMock(return_value=llm_response)
+
+        registry = MagicMock()
+        registry.get_client.return_value = client
+        return registry
+
+    @pytest.mark.asyncio
+    async def test_high_confidence_skips_llm(self, detector: IntentDetector) -> None:
+        """Высокая уверенность → LLM не вызывается."""
+        registry = MagicMock()
+        # "Болит колено" → health_concern с confidence=0.95
+        result = await detector.detect(
+            "Болит колено", llm_registry=registry
+        )
+        assert result.intent == "health_concern"
+        assert result.llm_used is False
+        registry.get_client.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_low_confidence_calls_llm(self, detector: IntentDetector) -> None:
+        """Низкая уверенность → LLM вызывается и возвращает корректный intent."""
+        registry = self._make_registry(
+            '{"intent": "data_analysis", "confidence": 0.9, "entities": {}}'
+        )
+        # Неоднозначный запрос → rule-based даст низкую уверенность
+        result = await detector.detect(
+            "хм, интересно что там с моими показателями", llm_registry=registry
+        )
+        assert result.intent == "data_analysis"
+        assert result.llm_used is True
+        assert result.confidence == 0.9
+
+    @pytest.mark.asyncio
+    async def test_llm_without_registry_no_crash(self, detector: IntentDetector) -> None:
+        """Без registry → возвращается rule-based результат без ошибки."""
+        result = await detector.detect("хм", llm_registry=None)
+        assert result.intent == "general_chat"
+        assert result.llm_used is False
+
+    @pytest.mark.asyncio
+    async def test_json_parse_fail_falls_back_to_rule_based(
+        self, detector: IntentDetector
+    ) -> None:
+        """Невалидный JSON от LLM → возврат rule-based результата + llm_used=False."""
+        registry = self._make_registry("Извините, я не могу ответить в JSON формате.")
+        result = await detector.detect(
+            "непонятный запрос без ключевых слов", llm_registry=registry
+        )
+        assert result.llm_used is False  # fallback сработал
+        assert result.intent in {"general_chat", "data_analysis", "data_retrieval",
+                                  "plan_request", "health_concern", "direct_question",
+                                  "emergency", "off_topic"}
+
+    @pytest.mark.asyncio
+    async def test_llm_unknown_intent_falls_back(self, detector: IntentDetector) -> None:
+        """Неизвестный intent от LLM → fallback на rule-based."""
+        registry = self._make_registry(
+            '{"intent": "неизвестный_тип", "confidence": 0.9, "entities": {}}'
+        )
+        result = await detector.detect("непонятный вопрос", llm_registry=registry)
+        assert result.llm_used is False
+
+    @pytest.mark.asyncio
+    async def test_llm_error_falls_back(self, detector: IntentDetector) -> None:
+        """Ошибка LLM-вызова → fallback на rule-based без исключения."""
+        client = AsyncMock()
+        client.generate = AsyncMock(side_effect=Exception("Ollama недоступен"))
+
+        registry = MagicMock()
+        registry.get_client.return_value = client
+
+        result = await detector.detect("непонятный вопрос", llm_registry=registry)
+        assert result.llm_used is False
+
+    @pytest.mark.asyncio
+    async def test_llm_entities_merged_with_rule_based(
+        self, detector: IntentDetector
+    ) -> None:
+        """Entities из LLM объединяются с rule-based; rule-based имеет приоритет."""
+        registry = self._make_registry(
+            '{"intent": "data_analysis", "confidence": 0.85, '
+            '"entities": {"metric": "hrv", "extra": "value"}}'
+        )
+        # sport_type "бег" → rule-based найдёт running
+        result = await detector.detect(
+            "как мой бег в целом?", llm_registry=registry
+        )
+        # Rule-based sport_type должен быть сохранён
+        assert result.entities.get("sport_type") == "running"
+        # LLM-only entity должен быть включён
+        assert result.entities.get("extra") == "value"
+
+    @pytest.mark.asyncio
+    async def test_history_passed_to_llm(self, detector: IntentDetector) -> None:
+        """История диалога передаётся при вызове LLM."""
+        registry = self._make_registry(
+            '{"intent": "data_retrieval", "confidence": 0.88, "entities": {}}'
+        )
+        history = [
+            {"role": "user", "content": "Привет"},
+            {"role": "assistant", "content": "Здравствуйте!"},
+        ]
+        result = await detector.detect(
+            "покажи что у меня", llm_registry=registry, history=history
+        )
+        # LLM должен был получить вызов с историей (verify через generate call)
+        client = registry.get_client.return_value
+        call_args = client.generate.call_args
+        assert "Привет" in call_args.kwargs.get("prompt", "") or \
+               "Привет" in (call_args.args[0] if call_args.args else "")
+
+
+# ---------------------------------------------------------------------------
+# Вспомогательные функции
+# ---------------------------------------------------------------------------
+
+class TestParseJson:
+    """Тесты парсера JSON ответов LLM."""
+
+    def test_valid_json(self) -> None:
+        result = _parse_llm_json('{"intent": "plan_request", "confidence": 0.9}')
+        assert result is not None
+        assert result["intent"] == "plan_request"
+
+    def test_json_in_markdown_block(self) -> None:
+        text = '```json\n{"intent": "health_concern", "confidence": 0.8}\n```'
+        result = _parse_llm_json(text)
+        assert result is not None
+        assert result["intent"] == "health_concern"
+
+    def test_json_embedded_in_text(self) -> None:
+        text = 'Вот мой ответ: {"intent": "data_analysis", "confidence": 0.75} и всё.'
+        result = _parse_llm_json(text)
+        assert result is not None
+        assert result["intent"] == "data_analysis"
+
+    def test_invalid_text_returns_none(self) -> None:
+        result = _parse_llm_json("Я не могу определить намерение.")
+        assert result is None

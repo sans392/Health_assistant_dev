@@ -1,7 +1,35 @@
-"""Модуль определения намерения пользователя (rule-based классификатор)."""
+"""Модуль определения намерения пользователя (Phase 2 — rule-based + LLM fallback).
 
+Stage 1: rule-based классификатор (regex + keyword scoring).
+Stage 2: LLM fallback через intent_llm роль при confidence < 0.85.
+"""
+
+import json
+import logging
 import re
+import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.services.llm_registry import LLMRegistry
+
+logger = logging.getLogger(__name__)
+
+# Порог уверенности для перехода на LLM stage 2
+_LLM_FALLBACK_THRESHOLD = 0.85
+
+# Допустимые значения intent (для валидации ответа LLM)
+_VALID_INTENTS = {
+    "data_retrieval",
+    "plan_request",
+    "health_concern",
+    "data_analysis",
+    "direct_question",
+    "general_chat",
+    "emergency",
+    "off_topic",
+}
 
 
 @dataclass
@@ -12,6 +40,7 @@ class IntentResult:
     confidence: float     # уверенность от 0.0 до 1.0
     entities: dict        # извлечённые сущности
     raw_query: str        # исходный запрос
+    llm_used: bool = False  # True если была выполнена LLM stage 2
 
 
 # Правила классификации: (паттерн, intent, confidence)
@@ -48,7 +77,7 @@ _RULES: list[tuple[str, str, float]] = [
 ]
 
 # Паттерны для извлечения сущностей time_range
-_TIME_RANGE_PATTERNS: list[tuple[str, str]] = [
+_TIME_RANGE_PATTERNS: list[tuple[str, str | None]] = [
     (r"\bсегодня\b", "сегодня"),
     (r"\bвчера\b", "вчера"),
     (r"\bза неделю\b|\bна прошл\w+ неделе\b|\bза последн\w+ неделю\b", "за неделю"),
@@ -82,16 +111,44 @@ _SPORT_PATTERNS: list[tuple[str, str]] = [
     (r"\bходьб\w+\b|\bпрогулк\w*\b", "walking"),
 ]
 
-# Паттерны для извлечения сущностей metric
+# Паттерны для извлечения сущностей metric (расширенный Phase 2)
 _METRIC_PATTERNS: list[tuple[str, str]] = [
-    (r"\bпульс\w*\b|\bчсс\b|\bсердцебиени\w+\b", "пульс"),
+    (r"\bпульс\w*\b|\bчсс\b|\bсердцебиени\w+\b|\bheart.rate\b", "heart_rate"),
+    (r"\bhrv\b|\bвариабельност\w+.*(ритм|пульс|серд)", "hrv"),
     (r"\bвес\w*\b|\bмасс\w+\b|\bвеш\w+\b", "вес"),
     (r"\bкалори\w+\b|\bккал\b", "калории"),
     (r"\bшаг\w*\b|\bшагомер\w*\b", "шаги"),
     (r"\bрост\w*\b", "рост"),
     (r"\bдистанци\w+\b|\bкилометр\w*\b|\bкм\b", "дистанция"),
     (r"\bвремя\b|\bдлительност\w+\b|\bпродолжительност\w+\b", "время"),
-    (r"\bтемп\w*\b|\bскорост\w+\b", "темп"),
+    (r"\bтемп\w*\b|\bскорост\w+\b|\bпейс\b|\bpace\b", "темп"),
+    (r"\bкаденс\b|\bcadence\b|\bшагов.в.минут\w*\b", "cadence"),
+    (r"\bсон\b|\bсна\b|\bсну\b|\bсном\b|\bсне\b|\bсплю\b|\bсплюсь\b|\bнасколько.*(сплю|сон)", "сон"),
+    (r"\bвосстановлен\w+\b|\brecovery\b", "recovery"),
+    (r"\bнагрузк\w+\b|\bstrain\b", "strain"),
+    (r"\brpe\b|\bсубъективн\w*.*(нагрузк|усили)", "rpe"),
+]
+
+# Паттерны для извлечения body_part
+_BODY_PART_PATTERNS: list[tuple[str, str]] = [
+    (r"\bспин\w*\b|\bспиной\b", "спина"),
+    (r"\bколен\w+\b|\bколено\b", "колено"),
+    (r"\bпоясниц\w+\b|\bпояснич\w+\b", "поясница"),
+    (r"\bплеч\w+\b|\bнаплечн\w+\b", "плечи"),
+    (r"\bше[ея]\w*\b|\bшейн\w+\b", "шея"),
+    (r"\bбедр\w+\b|\bбедренн\w+\b", "бедро"),
+    (r"\bлодыжк\w+\b|\bлодыжечн\w+\b", "лодыжка"),
+    (r"\bзапяст\w+\b", "запястье"),
+    (r"\bлоктевой\b|\bлокт\w+\b", "локоть"),
+    (r"\bикр\w+\b|\bикроножн\w+\b", "икра"),
+]
+
+# Паттерны для извлечения intensity
+_INTENSITY_PATTERNS: list[tuple[str, str]] = [
+    (r"\bлегк\w+\b|\bнебольш\w+\b|\bлёгк\w+\b", "легко"),
+    (r"\bтяжел\w*\b|\bтяжёл\w*\b|\bтяжко\b|\bсложно\b|\bинтенсивн\w+\b", "тяжело"),
+    (r"\bсильно\b|\bсильн\w+\b|\bочень\b", "сильно"),
+    (r"\bумеренно\b|\bумеренн\w+\b|\bсредн\w+\b", "умеренно"),
 ]
 
 
@@ -100,7 +157,7 @@ def _extract_entities(text: str) -> dict:
     entities: dict = {}
     lower = text.lower()
 
-    # Извлечение time_range
+    # time_range
     for pattern, label in _TIME_RANGE_PATTERNS:
         if label is None:
             m = re.search(pattern, lower)
@@ -111,53 +168,216 @@ def _extract_entities(text: str) -> dict:
             entities["time_range"] = label
             break
 
-    # Извлечение sport_type
+    # sport_type
     for pattern, sport in _SPORT_PATTERNS:
         if re.search(pattern, lower):
             entities["sport_type"] = sport
             break
 
-    # Извлечение metric
+    # metric
     for pattern, metric in _METRIC_PATTERNS:
         if re.search(pattern, lower):
             entities["metric"] = metric
             break
 
+    # body_part
+    for pattern, part in _BODY_PART_PATTERNS:
+        if re.search(pattern, lower):
+            entities["body_part"] = part
+            break
+
+    # intensity
+    for pattern, intensity in _INTENSITY_PATTERNS:
+        if re.search(pattern, lower):
+            entities["intensity"] = intensity
+            break
+
     return entities
 
 
-class IntentDetector:
-    """Rule-based классификатор намерений пользователя."""
+def _detect_rule_based(query: str) -> IntentResult:
+    """Stage 1: rule-based классификация (синхронная)."""
+    lower = query.lower().strip()
+    entities = _extract_entities(query)
 
-    def detect(self, query: str) -> IntentResult:
-        """Определяет намерение пользователя по тексту запроса.
+    best_intent = "general_chat"
+    best_confidence = 0.0
+
+    for pattern, intent, confidence in _RULES:
+        if re.search(pattern, lower):
+            if confidence > best_confidence:
+                best_intent = intent
+                best_confidence = confidence
+
+    if best_confidence < 0.5:
+        best_intent = "general_chat"
+        best_confidence = 0.3
+
+    return IntentResult(
+        intent=best_intent,
+        confidence=best_confidence,
+        entities=entities,
+        raw_query=query,
+        llm_used=False,
+    )
+
+
+def _parse_llm_json(text: str) -> dict | None:
+    """Разобрать JSON-ответ LLM с несколькими fallback-стратегиями."""
+    # 1. Прямой парсинг
+    try:
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Извлечь JSON из markdown-блока ```json ... ```
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Найти первый {...} в тексте
+    m = re.search(r"\{[^{}]*\}", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+def _build_llm_prompt(query: str, history: list[dict] | None) -> str:
+    """Собрать промпт для LLM stage 2."""
+    history_text = ""
+    if history:
+        recent = history[-3:]  # последние 3 сообщения
+        lines = []
+        for msg in recent:
+            role = "Пользователь" if msg.get("role") == "user" else "Ассистент"
+            content = msg.get("content", "")[:200]
+            lines.append(f"{role}: {content}")
+        history_text = "\n".join(lines)
+
+    intents_desc = """- data_retrieval: запрос исторических данных о тренировках и активностях
+- plan_request: просьба составить план тренировок или программу
+- health_concern: жалоба на боль, дискомфорт, травму или плохое самочувствие
+- data_analysis: запрос анализа, сравнения, динамики или прогресса тренировок
+- direct_question: простой вопрос о конкретном показателе здоровья
+- general_chat: приветствие, благодарность, общий разговор
+- emergency: экстренная ситуация, острая боль, угроза жизни
+- off_topic: вопрос не по теме здоровья и фитнеса"""
+
+    history_block = (
+        f"\nПоследние сообщения диалога:\n{history_text}\n"
+        if history_text else ""
+    )
+
+    return (
+        f"Определи намерение пользователя. Ответь строго в формате JSON.\n\n"
+        f"Доступные намерения:\n{intents_desc}\n"
+        f"{history_block}\n"
+        f"Текущий запрос: {query}\n\n"
+        f'Ответ JSON (только JSON, без пояснений): {{"intent": "...", "confidence": 0.0, "entities": {{}}}}'
+    )
+
+
+class IntentDetector:
+    """Классификатор намерений пользователя (rule-based + LLM fallback).
+
+    Stage 1: regex-правила (синхронно, быстро).
+    Stage 2: LLM через intent_llm роль при confidence < 0.85.
+    """
+
+    async def detect(
+        self,
+        query: str,
+        llm_registry: "LLMRegistry | None" = None,
+        history: list[dict] | None = None,
+    ) -> IntentResult:
+        """Определить намерение пользователя.
 
         Args:
             query: Текст запроса пользователя.
+            llm_registry: Реестр LLM-моделей (для Stage 2). None = только rule-based.
+            history: История диалога [{"role": "user"/"assistant", "content": "..."}].
 
         Returns:
-            IntentResult с определённым намерением и извлечёнными сущностями.
+            IntentResult с определённым намерением и сущностями.
         """
-        lower = query.lower().strip()
-        entities = _extract_entities(query)
+        # Stage 1: rule-based
+        result = _detect_rule_based(query)
 
-        best_intent = "general_chat"
-        best_confidence = 0.0
+        # Stage 2: LLM fallback при низкой уверенности
+        if llm_registry is not None and result.confidence < _LLM_FALLBACK_THRESHOLD:
+            result = await self._llm_stage(query, result, llm_registry, history)
 
-        for pattern, intent, confidence in _RULES:
-            if re.search(pattern, lower):
-                if confidence > best_confidence:
-                    best_intent = intent
-                    best_confidence = confidence
+        return result
 
-        # Fallback: если уверенность слишком низкая — general_chat
-        if best_confidence < 0.5:
-            best_intent = "general_chat"
-            best_confidence = 0.3
+    async def _llm_stage(
+        self,
+        query: str,
+        stage1_result: IntentResult,
+        llm_registry: "LLMRegistry",
+        history: list[dict] | None,
+    ) -> IntentResult:
+        """Stage 2: LLM-уточнение намерения."""
+        prompt = _build_llm_prompt(query, history)
+        start_ms = time.monotonic() * 1000
+
+        try:
+            client = llm_registry.get_client("intent_llm")
+            llm_response = await client.generate(
+                prompt=prompt,
+                temperature=0.1,
+                max_tokens=200,
+            )
+        except Exception as exc:
+            logger.warning(
+                "IntentDetector Stage 2: LLM вызов завершился ошибкой: %s. "
+                "Используем rule-based результат.",
+                exc,
+            )
+            return stage1_result
+
+        duration_ms = time.monotonic() * 1000 - start_ms
+        logger.info(
+            "IntentDetector Stage 2: LLM вызов завершён за %.1fms (model=%s)",
+            duration_ms,
+            llm_response.model,
+        )
+
+        parsed = _parse_llm_json(llm_response.content)
+        if parsed is None:
+            logger.warning(
+                "IntentDetector Stage 2: не удалось разобрать JSON ответ LLM: %r. "
+                "Используем rule-based результат.",
+                llm_response.content[:200],
+            )
+            return stage1_result
+
+        llm_intent = parsed.get("intent", "")
+        llm_confidence = float(parsed.get("confidence", 0.0))
+        llm_entities = parsed.get("entities", {}) or {}
+
+        # Валидация intent из LLM
+        if llm_intent not in _VALID_INTENTS:
+            logger.warning(
+                "IntentDetector Stage 2: LLM вернул неизвестный intent %r. "
+                "Используем rule-based результат.",
+                llm_intent,
+            )
+            return stage1_result
+
+        # Объединяем entities: rule-based + LLM (rule-based имеет приоритет)
+        merged_entities = {**llm_entities, **stage1_result.entities}
 
         return IntentResult(
-            intent=best_intent,
-            confidence=best_confidence,
-            entities=entities,
+            intent=llm_intent,
+            confidence=min(1.0, max(0.0, llm_confidence)),
+            entities=merged_entities,
             raw_query=query,
+            llm_used=True,
         )
