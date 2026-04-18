@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}Semantic Memory{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Semantic Memory</h1>
+  <p>Просмотр и управление записями semantic memory. Записей: <strong>{{ total }}</strong></p>
+</div>
+
+{% if not available %}
+<div style="background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.3);border-radius:8px;padding:12px 16px;margin-bottom:20px;font-size:13px;color:#f85149;">
+  ⚠ ChromaDB недоступен. Semantic memory не работает.
+</div>
+{% else %}
+
+<!-- Controls -->
+<div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;margin-bottom:20px;">
+  <div>
+    <label style="font-size:11px;color:var(--pico-muted-color);text-transform:uppercase;letter-spacing:.04em;">Пользователь</label>
+    <select id="user-select" style="margin-top:4px;min-width:200px;"
+            onchange="filterByUser()">
+      <option value="">Все пользователи</option>
+      {% for uid in all_users %}
+        <option value="{{ uid }}" {% if selected_user_id == uid %}selected{% endif %}>{{ uid }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <!-- Semantic search -->
+  <div style="flex:1;min-width:260px;">
+    <label style="font-size:11px;color:var(--pico-muted-color);text-transform:uppercase;letter-spacing:.04em;">Семантический поиск</label>
+    <div style="display:flex;gap:8px;margin-top:4px;">
+      <input type="text" id="search-query" placeholder="Запрос..." style="margin:0;flex:1;">
+      <button onclick="searchMemory()" style="padding:7px 14px;font-size:13px;">Найти</button>
+    </div>
+  </div>
+
+  {% if selected_user_id %}
+  <div style="padding-top:20px;">
+    <button onclick="clearMemory('{{ selected_user_id }}')" class="outline"
+            style="font-size:13px;padding:7px 14px;color:#f85149;border-color:#f85149;">
+      Очистить для {{ selected_user_id }}
+    </button>
+  </div>
+  {% endif %}
+</div>
+
+<div id="search-status" style="display:none;font-size:13px;color:var(--pico-muted-color);margin-bottom:12px;"></div>
+
+<!-- Table -->
+<div id="memory-table">
+  {% include "partials/memory_table.html" %}
+</div>
+
+{% endif %}
+
+<script>
+function filterByUser() {
+  const uid = document.getElementById('user-select').value;
+  const url = new URL(window.location.href);
+  if (uid) {
+    url.searchParams.set('user_id', uid);
+  } else {
+    url.searchParams.delete('user_id');
+  }
+  window.location.href = url.toString();
+}
+
+async function searchMemory() {
+  const query = document.getElementById('search-query').value.trim();
+  const user_id = document.getElementById('user-select').value;
+  const statusEl = document.getElementById('search-status');
+
+  if (!query) { alert('Введите запрос'); return; }
+  if (!user_id) { alert('Выберите пользователя для поиска'); return; }
+
+  statusEl.style.display = 'block';
+  statusEl.textContent = '⏳ Ищем...';
+
+  try {
+    const creds = btoa('{{ admin_user }}:{{ admin_pass }}');
+    const resp = await fetch('/api/admin/memory/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Basic ' + creds },
+      body: JSON.stringify({ query, user_id, top_k: 10 }),
+    });
+    const data = await resp.json();
+    statusEl.textContent = `Найдено: ${data.total}`;
+    renderSearchResults(data.items);
+  } catch (e) {
+    statusEl.textContent = 'Ошибка: ' + e.message;
+  }
+}
+
+function renderSearchResults(items) {
+  const container = document.getElementById('memory-table');
+  if (!items.length) {
+    container.innerHTML = '<p style="color:var(--pico-muted-color);margin-top:16px;">Ничего не найдено.</p>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Score</th><th>Q/A</th><th>Время</th><th>User</th><th>Request ID</th></tr></thead><tbody>';
+  for (const r of items) {
+    const preview = (r.text || '').slice(0, 200);
+    html += `<tr>
+      <td><span class="badge badge-info">${(r.score||0).toFixed(3)}</span></td>
+      <td class="truncate" style="max-width:400px;" title="${escHtml(r.text||'')}">${escHtml(preview)}</td>
+      <td style="white-space:nowrap;font-size:12px;">${(r.timestamp||'').slice(0,19)}</td>
+      <td>${escHtml(r.user_id||'')}</td>
+      <td style="font-size:11px;color:var(--pico-muted-color);">${r.request_id ? `<a href="/admin/logs/${r.request_id}">${r.request_id.slice(0,8)}…</a>` : '—'}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function clearMemory(userId) {
+  if (!confirm(`Удалить все записи для пользователя ${userId}?`)) return;
+  const creds = btoa('{{ admin_user }}:{{ admin_pass }}');
+  try {
+    const resp = await fetch('/api/admin/memory?user_id=' + encodeURIComponent(userId), {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Basic ' + creds },
+    });
+    const data = await resp.json();
+    if (data.status === 'ok') {
+      alert(`Удалено: ${data.deleted}`);
+      location.reload();
+    } else {
+      alert(data.detail || 'Ошибка');
+    }
+  } catch (e) {
+    alert('Ошибка: ' + e.message);
+  }
+}
+</script>
+{% endblock %}

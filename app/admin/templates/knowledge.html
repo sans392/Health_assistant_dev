@@ -1,0 +1,279 @@
+{% extends "base.html" %}
+{% block title %}Knowledge Base{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Knowledge Base</h1>
+  <p>RAG-чанки знаний. Всего: <strong>{{ total }}</strong></p>
+</div>
+
+<!-- Filters -->
+<form method="get" action="/admin/knowledge" class="filters-form" style="margin-bottom:20px;">
+  <div>
+    <label>Категория</label>
+    <select name="category" onchange="this.form.submit()">
+      <option value="">Все</option>
+      {% for cat in all_categories %}
+        <option value="{{ cat }}" {% if filters.category == cat %}selected{% endif %}>{{ cat }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>Вид спорта</label>
+    <select name="sport_type" onchange="this.form.submit()">
+      <option value="">Все</option>
+      {% for st in all_sport_types %}
+        <option value="{{ st }}" {% if filters.sport_type == st %}selected{% endif %}>{{ st }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>Уверенность</label>
+    <select name="confidence" onchange="this.form.submit()">
+      <option value="">Все</option>
+      <option value="high" {% if filters.confidence == 'high' %}selected{% endif %}>high</option>
+      <option value="medium" {% if filters.confidence == 'medium' %}selected{% endif %}>medium</option>
+    </select>
+  </div>
+  <div>
+    <label>Поиск по тексту</label>
+    <input type="text" name="q" value="{{ filters.q or '' }}" placeholder="Ключевое слово...">
+  </div>
+  <div style="padding-top:20px;">
+    <button type="submit" style="padding:7px 16px;font-size:13px;">Фильтр</button>
+    <a href="/admin/knowledge" style="margin-left:8px;font-size:13px;">Сбросить</a>
+  </div>
+</form>
+
+<!-- Actions -->
+<div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+  <button onclick="openAddModal()" style="font-size:13px;padding:7px 16px;">+ Добавить чанк</button>
+  <button onclick="reindexAll()" class="outline" style="font-size:13px;padding:7px 16px;">↺ Переиндексировать все</button>
+  <span id="reindex-status" style="display:none;font-size:13px;color:var(--pico-muted-color);align-self:center;"></span>
+</div>
+
+<!-- Table -->
+{% if chunks %}
+<div style="overflow-x:auto;">
+  <table>
+    <thead>
+      <tr>
+        <th>Категория</th>
+        <th>Источник</th>
+        <th>Conf</th>
+        <th>Спорт</th>
+        <th>Уровень</th>
+        <th>Текст (100 симв.)</th>
+        <th>Chroma</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in chunks %}
+      <tr>
+        <td><span class="badge badge-info">{{ c.category }}</span></td>
+        <td class="truncate" style="max-width:140px;" title="{{ c.source }}">{{ c.source }}</td>
+        <td>
+          {% if c.confidence == 'high' %}
+            <span class="badge badge-ok">high</span>
+          {% else %}
+            <span class="badge badge-warn">medium</span>
+          {% endif %}
+        </td>
+        <td>{{ c.sport_type or '—' }}</td>
+        <td>{{ c.experience_level or '—' }}</td>
+        <td class="truncate" style="max-width:300px;" title="{{ c.text_preview }}">{{ c.text_preview }}</td>
+        <td>
+          {% if c.embedding_id %}
+            <span class="badge badge-ok">✓</span>
+          {% else %}
+            <span class="badge badge-err">✗</span>
+          {% endif %}
+        </td>
+        <td>
+          <button onclick="deleteChunk('{{ c.id }}')" class="outline"
+                  style="font-size:11px;padding:4px 10px;color:#f85149;border-color:#f85149;">
+            Удалить
+          </button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<!-- Pagination -->
+{% if pages > 1 %}
+<div class="pagination">
+  {% set base_qs = [] %}
+  {% if filters.category %}{% set _ = base_qs.append('category=' ~ filters.category) %}{% endif %}
+  {% if filters.sport_type %}{% set _ = base_qs.append('sport_type=' ~ filters.sport_type) %}{% endif %}
+  {% if filters.confidence %}{% set _ = base_qs.append('confidence=' ~ filters.confidence) %}{% endif %}
+  {% if filters.q %}{% set _ = base_qs.append('q=' ~ filters.q) %}{% endif %}
+  {% set qs = ('&' ~ base_qs | join('&')) if base_qs else '' %}
+
+  {% if page > 1 %}
+    <a href="/admin/knowledge?page={{ page - 1 }}{{ qs }}">← Назад</a>
+  {% endif %}
+  <span style="font-size:13px;color:var(--pico-muted-color);">{{ page }} / {{ pages }}</span>
+  {% if page < pages %}
+    <a href="/admin/knowledge?page={{ page + 1 }}{{ qs }}">Вперёд →</a>
+  {% endif %}
+</div>
+{% endif %}
+
+{% else %}
+<p style="color:var(--pico-muted-color);margin-top:32px;text-align:center;">
+  Чанков не найдено. Добавьте первый или запустите <code>seed_knowledge.py</code>.
+</p>
+{% endif %}
+
+<!-- Add chunk modal -->
+<dialog id="add-modal">
+  <article style="max-width:600px;margin:0 auto;">
+    <header style="display:flex;justify-content:space-between;align-items:center;">
+      <h3 style="margin:0;">Добавить чанк</h3>
+      <button onclick="closeAddModal()" class="outline" style="padding:4px 10px;font-size:13px;">✕</button>
+    </header>
+
+    <div style="display:grid;gap:12px;margin-top:8px;">
+      <div>
+        <label style="font-size:12px;color:var(--pico-muted-color);">Категория *</label>
+        <select id="add-category">
+          <option value="physiology_norms">physiology_norms</option>
+          <option value="training_principles">training_principles</option>
+          <option value="recovery_science">recovery_science</option>
+          <option value="sport_specific">sport_specific</option>
+          <option value="nutrition_basics">nutrition_basics</option>
+        </select>
+      </div>
+      <div>
+        <label style="font-size:12px;color:var(--pico-muted-color);">Текст *</label>
+        <textarea id="add-text" rows="5" placeholder="Текст чанка знаний..."></textarea>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div>
+          <label style="font-size:12px;color:var(--pico-muted-color);">Источник</label>
+          <input type="text" id="add-source" placeholder="manual" value="admin">
+        </div>
+        <div>
+          <label style="font-size:12px;color:var(--pico-muted-color);">Уверенность</label>
+          <select id="add-confidence">
+            <option value="medium" selected>medium</option>
+            <option value="high">high</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:12px;color:var(--pico-muted-color);">Вид спорта</label>
+          <input type="text" id="add-sport-type" placeholder="running (опц.)">
+        </div>
+        <div>
+          <label style="font-size:12px;color:var(--pico-muted-color);">Уровень опыта</label>
+          <select id="add-experience">
+            <option value="">— не задан —</option>
+            <option value="beginner">beginner</option>
+            <option value="intermediate">intermediate</option>
+            <option value="advanced">advanced</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:16px;align-items:center;">
+      <button onclick="addChunk()" style="padding:8px 20px;">Добавить</button>
+      <button onclick="closeAddModal()" class="outline" style="padding:8px 20px;">Отмена</button>
+      <span id="add-indicator" style="display:none;font-size:13px;color:var(--pico-muted-color);">⏳</span>
+      <span id="add-err" style="display:none;font-size:13px;" class="badge badge-err"></span>
+    </div>
+  </article>
+</dialog>
+
+<script>
+function openAddModal() { document.getElementById('add-modal').showModal(); }
+function closeAddModal() { document.getElementById('add-modal').close(); }
+
+async function addChunk() {
+  const text = document.getElementById('add-text').value.trim();
+  const category = document.getElementById('add-category').value;
+  if (!text) { alert('Введите текст чанка'); return; }
+
+  const indicator = document.getElementById('add-indicator');
+  const errEl = document.getElementById('add-err');
+  indicator.style.display = 'inline';
+  errEl.style.display = 'none';
+
+  const payload = {
+    text,
+    category,
+    source: document.getElementById('add-source').value.trim() || 'admin',
+    confidence: document.getElementById('add-confidence').value,
+    sport_type: document.getElementById('add-sport-type').value.trim() || null,
+    experience_level: document.getElementById('add-experience').value || null,
+  };
+
+  try {
+    const creds = btoa('{{ admin_user }}:{{ admin_pass }}');
+    const resp = await fetch('/api/admin/knowledge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Basic ' + creds },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    indicator.style.display = 'none';
+    if (data.status === 'ok') {
+      closeAddModal();
+      location.reload();
+    } else {
+      errEl.textContent = data.detail || 'Ошибка';
+      errEl.style.display = 'inline';
+    }
+  } catch (e) {
+    indicator.style.display = 'none';
+    errEl.textContent = e.message;
+    errEl.style.display = 'inline';
+  }
+}
+
+async function deleteChunk(id) {
+  if (!confirm('Удалить чанк?')) return;
+  const creds = btoa('{{ admin_user }}:{{ admin_pass }}');
+  try {
+    const resp = await fetch('/api/admin/knowledge/' + id, {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Basic ' + creds },
+    });
+    const data = await resp.json();
+    if (data.status === 'ok') {
+      location.reload();
+    } else {
+      alert(data.detail || 'Ошибка удаления');
+    }
+  } catch (e) {
+    alert('Ошибка: ' + e.message);
+  }
+}
+
+async function reindexAll() {
+  if (!confirm('Пересчитать все эмбеддинги? Это может занять время.')) return;
+  const statusEl = document.getElementById('reindex-status');
+  statusEl.style.display = 'inline';
+  statusEl.textContent = '⏳ Переиндексируем...';
+
+  try {
+    const creds = btoa('{{ admin_user }}:{{ admin_pass }}');
+    const resp = await fetch('/api/admin/knowledge/reindex', {
+      method: 'POST',
+      headers: { 'Authorization': 'Basic ' + creds },
+    });
+    const data = await resp.json();
+    if (data.status === 'ok') {
+      statusEl.textContent = `✓ Готово: ${data.indexed} чанков, ошибок: ${data.errors}`;
+    } else {
+      statusEl.textContent = data.reason || 'Пропущено';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Ошибка: ' + e.message;
+  }
+}
+</script>
+{% endblock %}

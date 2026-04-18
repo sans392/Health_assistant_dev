@@ -20,6 +20,18 @@ Admin API (issue #14):
   POST /api/admin/seed/preview     — предпросмотр нескольких записей без записи (issue #33)
   GET  /api/admin/seed/runs        — журнал запусков SeedGenerator (issue #33)
   POST /api/admin/test-llm         — тест промпта через Ollama
+
+Phase 2 Admin API (issue #35):
+  GET  /api/admin/llm/config             — текущий конфиг ролей + список моделей Ollama
+  POST /api/admin/llm/config             — сохранить конфиг ролей в llm_role_config
+  POST /api/admin/llm/test/{role}        — тест промпта через указанную роль
+  GET  /api/admin/knowledge              — список RAG-чанков с фильтрами и поиском
+  POST /api/admin/knowledge              — добавить чанк (embed + запись)
+  DELETE /api/admin/knowledge/{id}       — удалить чанк (SQLite + ChromaDB)
+  POST /api/admin/knowledge/reindex      — пересчитать эмбеддинги всех чанков
+  POST /api/admin/memory/search          — семантический поиск по memory
+  GET  /api/admin/diagnostics            — health check всех компонентов + метрики
+  POST /api/admin/diagnostics/benchmark  — benchmark: N тестовых запросов, latency
 """
 
 import json
@@ -896,3 +908,568 @@ async def test_llm(
         }
     except Exception as exc:
         return {"status": "error", "error": str(exc), "response": None}
+
+
+# ---------------------------------------------------------------------------
+# LLM Config (Issue #35)
+# ---------------------------------------------------------------------------
+
+@router.get("/llm/config", dependencies=[Depends(_require_admin)])
+async def get_llm_config(
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Текущий конфиг ролей + список моделей Ollama."""
+    from app.services.llm_registry import llm_registry, ALL_ROLES
+    from app.services.llm_service import ollama_client
+
+    try:
+        models = await ollama_client.list_models()
+    except Exception:
+        models = []
+
+    roles_status = await llm_registry.health_check()
+
+    roles: list[dict[str, Any]] = []
+    for role in ALL_ROLES:
+        info = roles_status.get(role, {})
+        roles.append({
+            "role": role,
+            "model": info.get("model", llm_registry.get_model(role)),
+            "model_loaded": info.get("model_loaded", False),
+        })
+
+    return {"roles": roles, "available_models": models}
+
+
+@router.post("/llm/config", dependencies=[Depends(_require_admin)])
+async def save_llm_config(
+    payload: dict[str, Any] = Body(...),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Сохранить конфиг ролей.
+
+    Body: { "intent_llm": "model", "response": "model", ... }
+    """
+    from app.services.llm_registry import llm_registry, ALL_ROLES
+
+    saved: list[str] = []
+    for role in ALL_ROLES:
+        model = payload.get(role, "").strip()
+        if model:
+            await llm_registry.set_model_persistent(role, model, db)
+            saved.append(role)
+
+    return {"status": "ok", "saved_roles": saved}
+
+
+@router.post("/llm/test/{role}", dependencies=[Depends(_require_admin)])
+async def test_llm_role(
+    role: str,
+    payload: dict[str, Any] = Body(...),
+) -> dict[str, Any]:
+    """Тест промпта через указанную роль.
+
+    Body: { "prompt": "..." }
+    """
+    import time
+    from app.services.llm_registry import llm_registry, ALL_ROLES
+
+    if role not in ALL_ROLES:
+        raise HTTPException(status_code=400, detail=f"Неизвестная роль: {role}")
+
+    prompt = payload.get("prompt", "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Поле 'prompt' обязательно")
+
+    client = llm_registry.get_client(role)
+    try:
+        start = time.monotonic()
+        resp = await client.generate(prompt=prompt)
+        duration_ms = int((time.monotonic() - start) * 1000)
+        return {
+            "status": "ok",
+            "role": role,
+            "model": resp.model,
+            "response": resp.content,
+            "duration_ms": duration_ms,
+            "prompt_length": resp.prompt_length,
+            "response_length": resp.response_length,
+        }
+    except Exception as exc:
+        return {"status": "error", "role": role, "error": str(exc), "response": None}
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Base (Issue #35)
+# ---------------------------------------------------------------------------
+
+@router.get("/knowledge", dependencies=[Depends(_require_admin)])
+async def list_knowledge(
+    category: str | None = Query(None),
+    sport_type: str | None = Query(None),
+    confidence: str | None = Query(None),
+    q: str | None = Query(None, description="Поиск по тексту (LIKE %q%)"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Список RAG-чанков с фильтрами и поиском."""
+    from app.models.rag_chunk import RAGChunk
+    from sqlalchemy import or_
+
+    conditions = []
+    if category:
+        conditions.append(RAGChunk.category == category)
+    if sport_type:
+        conditions.append(RAGChunk.sport_type == sport_type)
+    if confidence:
+        conditions.append(RAGChunk.confidence == confidence)
+    if q:
+        conditions.append(RAGChunk.text.ilike(f"%{q}%"))
+
+    where = and_(*conditions) if conditions else True
+    total = (await db.execute(
+        select(func.count()).select_from(RAGChunk).where(where)
+    )).scalar() or 0
+
+    chunks = (await db.execute(
+        select(RAGChunk).where(where)
+        .order_by(RAGChunk.created_at.desc())
+        .offset((page - 1) * per_page).limit(per_page)
+    )).scalars().all()
+
+    return {
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": (total + per_page - 1) // per_page if total > 0 else 0,
+        "items": [
+            {
+                "id": c.id,
+                "category": c.category,
+                "source": c.source,
+                "confidence": c.confidence,
+                "sport_type": c.sport_type,
+                "experience_level": c.experience_level,
+                "text_preview": c.text[:100],
+                "text": c.text,
+                "embedding_id": c.embedding_id,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            }
+            for c in chunks
+        ],
+    }
+
+
+@router.post("/knowledge", dependencies=[Depends(_require_admin)])
+async def add_knowledge_chunk(
+    payload: dict[str, Any] = Body(...),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Добавить RAG-чанк (embed + запись в SQLite + ChromaDB).
+
+    Body: { "text", "category", "source", "confidence"?, "sport_type"?, "experience_level"? }
+    """
+    import uuid as _uuid
+    from app.models.rag_chunk import RAGChunk
+    from app.services.embedding_service import embedding_service
+    from app.services.vector_store import vector_store, COLLECTION_KNOWLEDGE_BASE
+
+    text = payload.get("text", "").strip()
+    category = payload.get("category", "").strip()
+    source = payload.get("source", "admin").strip()
+    confidence = payload.get("confidence", "medium").strip()
+    sport_type = payload.get("sport_type", "").strip() or None
+    experience_level = payload.get("experience_level", "").strip() or None
+
+    if not text:
+        raise HTTPException(status_code=400, detail="Поле 'text' обязательно")
+    if not category:
+        raise HTTPException(status_code=400, detail="Поле 'category' обязательно")
+
+    valid_categories = {
+        "physiology_norms", "training_principles", "recovery_science",
+        "sport_specific", "nutrition_basics",
+    }
+    if category not in valid_categories:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Неверная категория. Допустимые: {sorted(valid_categories)}",
+        )
+
+    chunk_id = str(_uuid.uuid4())
+    embedding_id: str | None = None
+
+    if vector_store.available:
+        try:
+            embeddings = await embedding_service.embed(text)
+            if embeddings and embeddings[0]:
+                meta: dict[str, Any] = {
+                    "category": category,
+                    "source": source,
+                    "confidence": confidence,
+                }
+                if sport_type:
+                    meta["sport_type"] = sport_type
+                if experience_level:
+                    meta["experience_level"] = experience_level
+                embedding_id = chunk_id
+                vector_store.add(
+                    collection=COLLECTION_KNOWLEDGE_BASE,
+                    ids=[embedding_id],
+                    embeddings=[embeddings[0]],
+                    metadatas=[meta],
+                    documents=[text],
+                )
+        except Exception as exc:
+            embedding_id = None
+
+    chunk = RAGChunk(
+        id=chunk_id,
+        text=text,
+        category=category,
+        source=source,
+        confidence=confidence,
+        sport_type=sport_type,
+        experience_level=experience_level,
+        embedding_id=embedding_id,
+    )
+    db.add(chunk)
+    await db.commit()
+    await db.refresh(chunk)
+
+    return {
+        "status": "ok",
+        "id": chunk.id,
+        "embedding_id": embedding_id,
+        "chroma_indexed": embedding_id is not None,
+    }
+
+
+@router.delete("/knowledge/{chunk_id}", dependencies=[Depends(_require_admin)])
+async def delete_knowledge_chunk(
+    chunk_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Удалить RAG-чанк из SQLite и ChromaDB."""
+    from app.models.rag_chunk import RAGChunk
+    from app.services.vector_store import vector_store, COLLECTION_KNOWLEDGE_BASE
+
+    result = await db.execute(select(RAGChunk).where(RAGChunk.id == chunk_id))
+    chunk = result.scalar_one_or_none()
+    if chunk is None:
+        raise HTTPException(status_code=404, detail="Чанк не найден")
+
+    if vector_store.available and chunk.embedding_id:
+        try:
+            vector_store.delete(
+                collection=COLLECTION_KNOWLEDGE_BASE,
+                ids=[chunk.embedding_id],
+            )
+        except Exception:
+            pass
+
+    await db.delete(chunk)
+    await db.commit()
+    return {"status": "ok", "deleted_id": chunk_id}
+
+
+@router.post("/knowledge/reindex", dependencies=[Depends(_require_admin)])
+async def reindex_knowledge(
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Пересчитать эмбеддинги всех RAG-чанков.
+
+    Удаляет коллекцию knowledge_base и заново индексирует все чанки из SQLite.
+    """
+    from app.models.rag_chunk import RAGChunk
+    from app.services.embedding_service import embedding_service
+    from app.services.vector_store import vector_store, COLLECTION_KNOWLEDGE_BASE
+
+    if not vector_store.available:
+        return {"status": "skipped", "reason": "chromadb unavailable", "indexed": 0}
+
+    # Получить все чанки из SQLite
+    chunks = (await db.execute(select(RAGChunk).order_by(RAGChunk.created_at))).scalars().all()
+    if not chunks:
+        return {"status": "ok", "indexed": 0, "message": "Нет чанков для индексации"}
+
+    # Очистить коллекцию
+    try:
+        vector_store.delete(collection=COLLECTION_KNOWLEDGE_BASE, ids=None)
+    except Exception:
+        pass
+
+    indexed = 0
+    errors = 0
+    for chunk in chunks:
+        try:
+            embeddings = await embedding_service.embed(chunk.text)
+            if not embeddings or not embeddings[0]:
+                errors += 1
+                continue
+            meta: dict[str, Any] = {
+                "category": chunk.category,
+                "source": chunk.source,
+                "confidence": chunk.confidence,
+            }
+            if chunk.sport_type:
+                meta["sport_type"] = chunk.sport_type
+            if chunk.experience_level:
+                meta["experience_level"] = chunk.experience_level
+            emb_id = chunk.embedding_id or chunk.id
+            vector_store.add(
+                collection=COLLECTION_KNOWLEDGE_BASE,
+                ids=[emb_id],
+                embeddings=[embeddings[0]],
+                metadatas=[meta],
+                documents=[chunk.text],
+            )
+            if chunk.embedding_id != emb_id:
+                chunk.embedding_id = emb_id
+            indexed += 1
+        except Exception:
+            errors += 1
+
+    await db.commit()
+    return {"status": "ok", "indexed": indexed, "errors": errors}
+
+
+# ---------------------------------------------------------------------------
+# Semantic Memory search (Issue #35)
+# ---------------------------------------------------------------------------
+
+@router.post("/memory/search", dependencies=[Depends(_require_admin)])
+async def search_semantic_memory(
+    payload: dict[str, Any] = Body(...),
+) -> dict[str, Any]:
+    """Семантический поиск по memory.
+
+    Body: { "query": "...", "user_id": "..." (optional), "top_k": 10 }
+    """
+    from app.services.semantic_memory import semantic_memory
+    from app.services.vector_store import vector_store
+
+    if not vector_store.available:
+        return {"available": False, "items": [], "total": 0}
+
+    query = payload.get("query", "").strip()
+    user_id = payload.get("user_id", "").strip() or None
+    top_k = int(payload.get("top_k", 10))
+
+    if not query:
+        raise HTTPException(status_code=400, detail="Поле 'query' обязательно")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Поле 'user_id' обязательно для поиска")
+
+    records = await semantic_memory.recall(
+        user_id=user_id,
+        query=query,
+        top_k=top_k,
+        min_score=0.0,
+    )
+    return {
+        "available": True,
+        "total": len(records),
+        "items": [r.to_dict() for r in records],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics (Issue #35)
+# ---------------------------------------------------------------------------
+
+@router.get("/diagnostics", dependencies=[Depends(_require_admin)])
+async def get_diagnostics(
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Health check всех компонентов + runtime метрики."""
+    import os
+    from app.services.llm_service import ollama_client
+    from app.services.llm_registry import llm_registry
+    from app.services.vector_store import vector_store
+    from app.models.rag_chunk import RAGChunk
+    from app.models.llm_call import LLMCall
+
+    # Ollama health
+    ollama_ok = await ollama_client.health_check()
+    roles_status = await llm_registry.health_check()
+
+    # ChromaDB health
+    chroma_status = vector_store.health_check()
+    chroma_dir_ok = os.path.isdir(settings.chroma_path)
+
+    # SQLite DB counts
+    db_counts: dict[str, int] = {}
+    try:
+        from app.models.activity import Activity
+        from app.models.daily_fact import DailyFact
+        from app.models.user_profile import UserProfile
+        from app.models.chat import ChatSession
+
+        for model_cls, key in [
+            (PipelineLog, "pipeline_logs"),
+            (Activity, "activities"),
+            (DailyFact, "daily_facts"),
+            (UserProfile, "profiles"),
+            (ChatSession, "chat_sessions"),
+            (RAGChunk, "rag_chunks"),
+            (LLMCall, "llm_calls"),
+        ]:
+            db_counts[key] = (
+                await db.execute(select(func.count()).select_from(model_cls))
+            ).scalar() or 0
+    except Exception as exc:
+        db_counts["error"] = str(exc)  # type: ignore[assignment]
+
+    db_size_bytes = 0
+    try:
+        db_size_bytes = os.path.getsize(settings.db_path)
+    except OSError:
+        pass
+
+    # Runtime метрики: последние 100 логов
+    recent_logs = (await db.execute(
+        select(PipelineLog)
+        .order_by(PipelineLog.timestamp.desc())
+        .limit(100)
+    )).scalars().all()
+
+    total_logs = len(recent_logs)
+    avg_duration = (
+        sum(l.total_duration_ms or 0 for l in recent_logs) // total_logs
+        if total_logs else 0
+    )
+    error_count = sum(1 for l in recent_logs if l.errors)
+    error_rate = round(error_count / total_logs * 100, 1) if total_logs else 0.0
+
+    # Stage latencies (среднее по последним 100)
+    stage_durations: dict[str, list[int]] = {}
+    for log in recent_logs:
+        for stage in (log.stage_trace or []):
+            name = stage.get("stage", "unknown")
+            dur = stage.get("duration_ms") or 0
+            stage_durations.setdefault(name, []).append(dur)
+    avg_stage_ms = {
+        stage: sum(vals) // len(vals)
+        for stage, vals in stage_durations.items()
+        if vals
+    }
+
+    return {
+        "ollama": {
+            "status": ollama_ok,
+            "roles": roles_status,
+        },
+        "chromadb": {
+            **chroma_status,
+            "persistent_dir_ok": chroma_dir_ok,
+            "path": settings.chroma_path,
+        },
+        "database": {
+            "size_bytes": db_size_bytes,
+            "counts": db_counts,
+        },
+        "runtime": {
+            "last_100_requests": total_logs,
+            "avg_duration_ms": avg_duration,
+            "error_count": error_count,
+            "error_rate_pct": error_rate,
+            "avg_stage_ms": avg_stage_ms,
+        },
+    }
+
+
+@router.post("/diagnostics/benchmark", dependencies=[Depends(_require_admin)])
+async def run_benchmark(
+    payload: dict[str, Any] = Body(default={}),
+) -> dict[str, Any]:
+    """Benchmark: N тестовых запросов, latency по компонентам.
+
+    Body: { "n": 5 }
+    """
+    import time
+    from app.services.llm_registry import llm_registry
+    from app.services.embedding_service import embedding_service
+    from app.services.vector_store import vector_store, COLLECTION_KNOWLEDGE_BASE
+
+    n = max(1, min(10, int(payload.get("n", 5))))
+
+    test_queries = [
+        "Сколько нужно отдыхать между тренировками?",
+        "Как улучшить восстановление после бега?",
+        "Какой пульс оптимален для сжигания жира?",
+        "Как избежать перетренированности?",
+        "Что есть перед тренировкой?",
+        "Сколько шагов в день полезно?",
+        "Как часто делать силовые тренировки?",
+        "Что такое HRV и как его интерпретировать?",
+        "Как долго длится фаза восстановления?",
+        "Какой объём нагрузки оптимален для начинающих?",
+    ][:n]
+
+    results: list[dict[str, Any]] = []
+
+    for query in test_queries:
+        row: dict[str, Any] = {"query": query[:60]}
+
+        # Embedding latency
+        embed_ms: int | None = None
+        embedding: list[float] | None = None
+        try:
+            t0 = time.monotonic()
+            embs = await embedding_service.embed(query)
+            embed_ms = int((time.monotonic() - t0) * 1000)
+            embedding = embs[0] if embs else None
+        except Exception as exc:
+            row["embed_error"] = str(exc)
+        row["embed_ms"] = embed_ms
+
+        # ChromaDB vector search latency
+        chroma_ms: int | None = None
+        chroma_hits = 0
+        if vector_store.available and embedding:
+            try:
+                t0 = time.monotonic()
+                res = vector_store.query(
+                    collection=COLLECTION_KNOWLEDGE_BASE,
+                    query_embedding=embedding,
+                    n_results=3,
+                )
+                chroma_ms = int((time.monotonic() - t0) * 1000)
+                chroma_hits = len((res.get("ids") or [[]])[0])
+            except Exception as exc:
+                row["chroma_error"] = str(exc)
+        row["chroma_ms"] = chroma_ms
+        row["chroma_hits"] = chroma_hits
+
+        # LLM intent_llm latency (lightweight role)
+        llm_ms: int | None = None
+        try:
+            client = llm_registry.get_client("intent_llm")
+            t0 = time.monotonic()
+            resp = await client.generate(
+                prompt=f"Classify: {query}\nAnswer with one word.",
+            )
+            llm_ms = int((time.monotonic() - t0) * 1000)
+        except Exception as exc:
+            row["llm_error"] = str(exc)
+        row["llm_ms"] = llm_ms
+
+        results.append(row)
+
+    # Сводная статистика
+    def _avg(key: str) -> int | None:
+        vals = [r[key] for r in results if r.get(key) is not None]
+        return sum(vals) // len(vals) if vals else None
+
+    return {
+        "status": "ok",
+        "n": n,
+        "results": results,
+        "summary": {
+            "avg_embed_ms": _avg("embed_ms"),
+            "avg_chroma_ms": _avg("chroma_ms"),
+            "avg_llm_ms": _avg("llm_ms"),
+        },
+    }

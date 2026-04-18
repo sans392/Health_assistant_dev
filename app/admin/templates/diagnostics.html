@@ -1,0 +1,257 @@
+{% extends "base.html" %}
+{% block title %}Diagnostics{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Diagnostics</h1>
+  <p>Health checks и метрики всех компонентов системы.</p>
+</div>
+
+<!-- Health Status -->
+<div class="section-title">Health Status</div>
+<div class="stat-grid">
+
+  <!-- Ollama -->
+  <div class="stat-card">
+    <div class="label">Ollama</div>
+    {% if ollama.status and ollama.status.get('available', False) %}
+      <div class="value" style="font-size:22px;">✓ OK</div>
+      <div class="sub">{{ ollama.status.get('model', '') }}</div>
+    {% else %}
+      <div class="value" style="font-size:22px;color:#f85149;">✗ DOWN</div>
+      <div class="sub">{{ ollama.status.get('error', 'недоступен') if ollama.status else 'недоступен' }}</div>
+    {% endif %}
+  </div>
+
+  <!-- ChromaDB -->
+  <div class="stat-card">
+    <div class="label">ChromaDB</div>
+    {% if chromadb.available %}
+      <div class="value" style="font-size:22px;">✓ OK</div>
+      <div class="sub">
+        KB: {{ chromadb.collections.get('knowledge_base', '—') }},
+        Mem: {{ chromadb.collections.get('semantic_memory', '—') }}
+      </div>
+    {% else %}
+      <div class="value" style="font-size:22px;color:#f85149;">✗ DOWN</div>
+      <div class="sub">{{ chromadb.get('error', 'недоступен') }}</div>
+    {% endif %}
+  </div>
+
+  <!-- SQLite -->
+  <div class="stat-card">
+    <div class="label">SQLite DB</div>
+    <div class="value" style="font-size:22px;">✓ OK</div>
+    <div class="sub">{{ (database.size_bytes / 1024 / 1024) | round(2) }} MB</div>
+  </div>
+
+  <!-- Dir -->
+  <div class="stat-card">
+    <div class="label">Chroma Dir</div>
+    {% if chromadb.persistent_dir_ok %}
+      <div class="value" style="font-size:22px;">✓ OK</div>
+    {% else %}
+      <div class="value" style="font-size:22px;color:#f0883e;">✗ MISSING</div>
+    {% endif %}
+    <div class="sub" style="font-size:11px;word-break:break-all;">{{ chromadb.path }}</div>
+  </div>
+
+</div>
+
+<!-- LLM Roles -->
+<div class="section-title">LLM Roles Status</div>
+<table>
+  <thead>
+    <tr>
+      <th>Роль</th>
+      <th>Модель</th>
+      <th>Статус</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for role, info in ollama.roles.items() %}
+    <tr>
+      <td><strong>{{ role }}</strong></td>
+      <td>{{ info.model }}</td>
+      <td>
+        {% if info.model_loaded %}
+          <span class="badge badge-ok">loaded</span>
+        {% else %}
+          <span class="badge badge-warn">not loaded</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<!-- DB Counts -->
+<div class="section-title">Database Records</div>
+<div class="stat-grid">
+  {% for key, count in database.counts.items() %}
+  <div class="stat-card">
+    <div class="label">{{ key }}</div>
+    <div class="value">{{ count if count >= 0 else '—' }}</div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- Runtime Metrics -->
+<div class="section-title">Runtime Metrics (последние 100 запросов)</div>
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="label">Запросов</div>
+    <div class="value">{{ runtime.last_100_requests }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Avg duration</div>
+    <div class="value">{{ runtime.avg_duration_ms }} <span style="font-size:14px;">мс</span></div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Ошибок</div>
+    <div class="value" {% if runtime.error_count > 0 %}style="color:#f85149;"{% endif %}>
+      {{ runtime.error_count }}
+    </div>
+    <div class="sub">{{ runtime.error_rate_pct }}%</div>
+  </div>
+</div>
+
+{% if runtime.avg_stage_ms %}
+<div class="section-title">Avg Stage Latency</div>
+<table>
+  <thead>
+    <tr>
+      <th>Stage</th>
+      <th>Avg ms</th>
+      <th>Визуализация</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% set max_ms = runtime.avg_stage_ms.values() | max %}
+    {% for stage, ms in runtime.avg_stage_ms.items() | sort(attribute='1', reverse=True) %}
+    <tr>
+      <td>{{ stage }}</td>
+      <td>{{ ms }}</td>
+      <td>
+        <div style="background:var(--pico-primary);height:8px;border-radius:4px;width:{{ (ms / max_ms * 200) | int }}px;min-width:4px;"></div>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<!-- Benchmark -->
+<div class="section-title">Benchmark</div>
+<div style="display:flex;gap:12px;align-items:center;margin-bottom:16px;flex-wrap:wrap;">
+  <div>
+    <label style="font-size:12px;color:var(--pico-muted-color);">Запросов</label>
+    <select id="bench-n" style="margin-top:4px;width:80px;">
+      <option value="3">3</option>
+      <option value="5" selected>5</option>
+      <option value="10">10</option>
+    </select>
+  </div>
+  <div style="padding-top:20px;">
+    <button onclick="runBenchmark()" style="padding:8px 20px;font-size:13px;">▶ Запустить</button>
+  </div>
+  <span id="bench-indicator" style="display:none;font-size:13px;color:var(--pico-muted-color);padding-top:20px;">⏳ Выполняется...</span>
+</div>
+
+<div id="bench-results" style="display:none;">
+  <div class="section-title" style="margin-top:0;">Результаты Benchmark</div>
+
+  <!-- Summary -->
+  <div class="stat-grid" id="bench-summary" style="margin-bottom:20px;"></div>
+
+  <!-- Detail table -->
+  <div style="overflow-x:auto;">
+    <table id="bench-table">
+      <thead>
+        <tr>
+          <th>Запрос</th>
+          <th>Embed мс</th>
+          <th>ChromaDB мс</th>
+          <th>Hits</th>
+          <th>LLM мс</th>
+        </tr>
+      </thead>
+      <tbody id="bench-tbody"></tbody>
+    </table>
+  </div>
+
+  <div style="margin-top:12px;">
+    <button onclick="exportBenchJSON()" class="outline" style="font-size:13px;padding:7px 14px;">
+      ↓ Экспорт JSON
+    </button>
+  </div>
+</div>
+
+<script>
+let lastBenchData = null;
+
+async function runBenchmark() {
+  const n = parseInt(document.getElementById('bench-n').value);
+  const indicator = document.getElementById('bench-indicator');
+  const resultsEl = document.getElementById('bench-results');
+  indicator.style.display = 'inline';
+  resultsEl.style.display = 'none';
+
+  try {
+    const creds = btoa('{{ admin_user }}:{{ admin_pass }}');
+    const resp = await fetch('/api/admin/diagnostics/benchmark', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Basic ' + creds },
+      body: JSON.stringify({ n }),
+    });
+    const data = await resp.json();
+    indicator.style.display = 'none';
+    lastBenchData = data;
+    renderBenchmark(data);
+  } catch (e) {
+    indicator.style.display = 'none';
+    alert('Ошибка: ' + e.message);
+  }
+}
+
+function renderBenchmark(data) {
+  const resultsEl = document.getElementById('bench-results');
+  const summaryEl = document.getElementById('bench-summary');
+  const tbodyEl = document.getElementById('bench-tbody');
+
+  const s = data.summary || {};
+  summaryEl.innerHTML = `
+    <div class="stat-card"><div class="label">Avg Embed</div><div class="value">${s.avg_embed_ms ?? '—'}<span style="font-size:14px;"> мс</span></div></div>
+    <div class="stat-card"><div class="label">Avg ChromaDB</div><div class="value">${s.avg_chroma_ms ?? '—'}<span style="font-size:14px;"> мс</span></div></div>
+    <div class="stat-card"><div class="label">Avg LLM (intent)</div><div class="value">${s.avg_llm_ms ?? '—'}<span style="font-size:14px;"> мс</span></div></div>
+  `;
+
+  tbodyEl.innerHTML = (data.results || []).map(r => `
+    <tr>
+      <td class="truncate" style="max-width:260px;" title="${escHtml(r.query||'')}">${escHtml(r.query||'')}</td>
+      <td>${r.embed_ms ?? (r.embed_error ? '<span style="color:#f85149;">err</span>' : '—')}</td>
+      <td>${r.chroma_ms ?? (r.chroma_error ? '<span style="color:#f85149;">err</span>' : r.chroma_ms === null ? 'N/A' : '—')}</td>
+      <td>${r.chroma_hits ?? '—'}</td>
+      <td>${r.llm_ms ?? (r.llm_error ? '<span style="color:#f85149;">err</span>' : '—')}</td>
+    </tr>
+  `).join('');
+
+  resultsEl.style.display = 'block';
+}
+
+function exportBenchJSON() {
+  if (!lastBenchData) return;
+  const blob = new Blob([JSON.stringify(lastBenchData, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'benchmark_' + new Date().toISOString().slice(0,19).replace(/:/g,'-') + '.json';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+{% endblock %}
