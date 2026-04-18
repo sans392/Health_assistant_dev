@@ -34,10 +34,16 @@
       <span class="topbar-title">Чат</span>
       <div class="topbar-actions">
         <button id="toggle-debug" class="btn btn-ghost btn-sm">🔍 Debug</button>
+        <button id="reconnect-btn" class="btn btn-ghost btn-sm hidden">↺ Переподключиться</button>
         <span id="conn-badge" class="conn-badge disconnected">
           <span class="dot"></span>Отключено
         </span>
       </div>
+    </div>
+
+    <!-- Stage indicator -->
+    <div id="stage-indicator" class="stage-indicator hidden">
+      <div id="stage-text"></div>
     </div>
 
     <div id="messages" class="messages-container"></div>
@@ -52,6 +58,10 @@
 
     <!-- Input -->
     <div class="input-area">
+      <div class="presets-wrap">
+        <button id="presets-btn" class="btn btn-ghost btn-sm">📋 Примеры ▾</button>
+        <div id="presets-menu" class="presets-menu hidden"></div>
+      </div>
       <div class="input-row">
         <div class="input-wrap">
           <textarea id="msg-input" placeholder="Напишите сообщение… (Enter — отправить, Shift+Enter — новая строка)" rows="1"></textarea>

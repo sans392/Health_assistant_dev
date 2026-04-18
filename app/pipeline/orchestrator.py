@@ -52,6 +52,22 @@ logger = logging.getLogger(__name__)
 _FALLBACK_RESPONSE = "Извините, произошла ошибка. Попробуйте переформулировать запрос."
 
 
+def _format_llm_calls(calls: list) -> list[dict]:
+    """Форматировать список LLM-вызовов для debug-данных в WebSocket."""
+    return [
+        {
+            "role": c.role,
+            "model": c.model,
+            "duration_ms": c.duration_ms,
+            "prompt_length": c.prompt_length,
+            "response_length": c.response_length,
+            "prompt_preview": (c.prompt or "")[:300],
+            "response_preview": (c.response or "")[:300],
+        }
+        for c in calls
+    ]
+
+
 @dataclass
 class PipelineResult:
     """Результат обработки запроса пайплайном."""
@@ -78,6 +94,10 @@ class PipelineResult:
     stage_trace: list = field(default_factory=list)
     llm_role_usage: dict = field(default_factory=dict)
 
+    # Phase 2 (Issue #36): extended debug
+    entities: dict = field(default_factory=dict)
+    llm_calls_detail: list[dict] = field(default_factory=list)
+
 
 class PipelineOrchestrator:
     """Оркестратор пайплайна — связывает все модули в единый поток обработки."""
@@ -97,6 +117,7 @@ class PipelineOrchestrator:
         raw_query: str,
         db: AsyncSession,
         on_token: Callable[[str], None] | None = None,
+        request_id: str | None = None,
     ) -> PipelineResult:
         """Обработать запрос пользователя через полный пайплайн.
 
@@ -122,6 +143,7 @@ class PipelineOrchestrator:
                 start_ms=start_ms,
                 errors=errors,
                 on_token=on_token,
+                provided_request_id=request_id,
             )
         except Exception as exc:
             logger.error(
@@ -146,7 +168,9 @@ class PipelineOrchestrator:
                 safety_level="unknown",
                 llm_model=ollama_client.model,
                 llm_calls_count=0,
-                request_id=str(uuid.uuid4()),
+                request_id=request_id or str(uuid.uuid4()),
+                entities={},
+                llm_calls_detail=[],
             )
 
     async def _run_pipeline(
@@ -158,11 +182,11 @@ class PipelineOrchestrator:
         start_ms: float,
         errors: list[str],
         on_token: Callable[[str], None] | None,
+        provided_request_id: str | None = None,
     ) -> PipelineResult:
         """Внутренняя реализация пайплайна."""
 
-        # Генерируем request_id в начале, чтобы привязать все LLM-вызовы и трейс
-        request_id = str(uuid.uuid4())
+        request_id = provided_request_id or str(uuid.uuid4())
         tracker = StageTracker(request_id)
         llm_token = llm_call_logger.start()
 
@@ -231,6 +255,8 @@ class PipelineOrchestrator:
                     request_id=request_id,
                     stage_trace=tracker.trace,
                     llm_role_usage={},
+                    entities=intent_result.entities,
+                    llm_calls_detail=_format_llm_calls(llm_calls),
                 )
 
             llm_model_used = ollama_client.model
@@ -290,6 +316,8 @@ class PipelineOrchestrator:
                     request_id=request_id,
                     stage_trace=tracker.trace,
                     llm_role_usage=llm_call_logger.build_role_usage(llm_calls),
+                    entities=intent_result.entities,
+                    llm_calls_detail=_format_llm_calls(llm_calls),
                 )
 
             tools_called: list[str] = []
@@ -452,6 +480,8 @@ class PipelineOrchestrator:
                 request_id=request_id,
                 stage_trace=tracker.trace,
                 llm_role_usage=llm_call_logger.build_role_usage(llm_calls),
+                entities=intent_result.entities if intent_result else {},
+                llm_calls_detail=_format_llm_calls(llm_calls),
             )
 
         except Exception:

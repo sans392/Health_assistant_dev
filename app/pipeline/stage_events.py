@@ -83,6 +83,18 @@ class StageEventBus:
             if not self._queues.get(request_id):
                 self._queues.pop(request_id, None)
 
+    def publish_nowait(self, request_id: str, event: StageEvent) -> None:
+        """Синхронная публикация события (put_nowait) — для on_token callback из sync-контекста."""
+        for q in self._queues.get(request_id, []):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                logger.warning(
+                    "StageEventBus: очередь переполнена request_id=%s stage=%s",
+                    request_id,
+                    event.stage,
+                )
+
     def close(self, request_id: str) -> None:
         """Закрыть все подписки request_id (отправить sentinel None)."""
         for q in list(self._queues.get(request_id, [])):

@@ -7,9 +7,11 @@ REST:
   GET  /api/chat/sessions/{id}/messages — история сообщений
 """
 
+import asyncio
 import json
 import logging
 import uuid
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -19,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.models.chat import ChatMessage, ChatSession
 from app.pipeline.orchestrator import pipeline_orchestrator
+from app.pipeline.stage_events import StageEvent, stage_event_bus
 from app.services.logging_service import logging_service
 
 logger = logging.getLogger(__name__)
@@ -168,7 +171,7 @@ async def websocket_chat(
             ],
         }, ensure_ascii=False))
 
-    # Основной цикл обработки сообщений
+    # Основной цикл — каждое сообщение запускает пайплайн и транслирует stage events
     try:
         while True:
             raw = await websocket.receive_text()
@@ -183,50 +186,129 @@ async def websocket_chat(
 
             logger.info("WS: получено сообщение | session=%s len=%d", session_id, len(query))
 
-            # Отправляем индикатор "печатает..."
-            await websocket.send_text(json.dumps({"type": "typing"}, ensure_ascii=False))
+            request_id = str(uuid.uuid4())
+            pipeline_result = None
+            pipeline_exc: Exception | None = None
 
-            # Запускаем пайплайн
+            def on_token(token: str) -> None:
+                """Публикует token-событие синхронно из callback response_generator."""
+                stage_event_bus.publish_nowait(
+                    request_id,
+                    StageEvent(
+                        type="token",
+                        request_id=request_id,
+                        token=token,
+                        timestamp=datetime.utcnow(),
+                    ),
+                )
+
+            async def run_pipeline() -> None:
+                nonlocal pipeline_result, pipeline_exc
+                try:
+                    pipeline_result = await pipeline_orchestrator.process_query(
+                        user_id=user_id,
+                        session_id=session_id,
+                        raw_query=query,
+                        db=db,
+                        on_token=on_token,
+                        request_id=request_id,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "WS: ошибка пайплайна | session=%s error=%s", session_id, exc, exc_info=True,
+                    )
+                    pipeline_exc = exc
+                finally:
+                    # Публикуем done/error чтобы завершить подписку
+                    if pipeline_exc is not None:
+                        await stage_event_bus.publish(
+                            request_id,
+                            StageEvent(
+                                type="error",
+                                request_id=request_id,
+                                message=str(pipeline_exc),
+                                timestamp=datetime.utcnow(),
+                            ),
+                        )
+                    else:
+                        await stage_event_bus.publish(
+                            request_id,
+                            StageEvent(
+                                type="done",
+                                request_id=request_id,
+                                message=pipeline_result.response_text if pipeline_result else "",
+                                timestamp=datetime.utcnow(),
+                            ),
+                        )
+
+            pipeline_task = asyncio.create_task(run_pipeline())
+
+            # Пересылаем stage events клиенту (loop завершается при type=done/error)
             try:
-                pipeline_result = await pipeline_orchestrator.process_query(
-                    user_id=user_id,
-                    session_id=session_id,
-                    raw_query=query,
-                    db=db,
+                async for event in stage_event_bus.subscribe(request_id):
+                    if event.type == "stage_start":
+                        await websocket.send_text(json.dumps({
+                            "type": "stage_start",
+                            "stage": event.stage,
+                            "request_id": request_id,
+                        }, ensure_ascii=False))
+                    elif event.type == "stage_end":
+                        await websocket.send_text(json.dumps({
+                            "type": "stage_end",
+                            "stage": event.stage,
+                            "duration_ms": event.duration_ms,
+                        }, ensure_ascii=False))
+                    elif event.type == "token":
+                        await websocket.send_text(json.dumps({
+                            "type": "token",
+                            "token": event.token,
+                        }, ensure_ascii=False))
+                    # type=done/error breaks the async generator automatically
+            except Exception as fwd_exc:
+                logger.error(
+                    "WS: ошибка пересылки событий | session=%s error=%s", session_id, fwd_exc,
                 )
+                pipeline_task.cancel()
+                continue
 
-                # Логируем результат
-                await logging_service.log_pipeline_request(
-                    user_id=user_id,
-                    session_id=session_id,
-                    result=pipeline_result,
-                    db=db,
-                )
+            await pipeline_task
 
-                # Отправляем ответ клиенту
+            if pipeline_exc is not None:
                 await websocket.send_text(json.dumps({
-                    "type": "message",
-                    "role": "assistant",
-                    "content": pipeline_result.response_text,
-                    "meta": {
+                    "type": "error",
+                    "message": "Произошла ошибка при обработке запроса. Попробуйте ещё раз.",
+                }, ensure_ascii=False))
+            elif pipeline_result is not None:
+                try:
+                    await logging_service.log_pipeline_request(
+                        user_id=user_id,
+                        session_id=session_id,
+                        result=pipeline_result,
+                        db=db,
+                    )
+                except Exception as log_exc:
+                    logger.warning("WS: ошибка логирования | %s", log_exc)
+
+                await websocket.send_text(json.dumps({
+                    "type": "done",
+                    "message": pipeline_result.response_text,
+                    "request_id": request_id,
+                    "debug": {
                         "intent": pipeline_result.intent,
                         "intent_confidence": pipeline_result.intent_confidence,
+                        "entities": pipeline_result.entities,
                         "route": pipeline_result.route,
+                        "safety_level": pipeline_result.safety_level,
                         "fast_path": pipeline_result.fast_path,
                         "blocked": pipeline_result.blocked,
-                        "safety_level": pipeline_result.safety_level,
                         "tools_called": pipeline_result.tools_called,
                         "modules_used": pipeline_result.modules_used,
                         "duration_ms": pipeline_result.duration_ms,
                         "errors": pipeline_result.errors,
+                        "stage_trace": pipeline_result.stage_trace,
+                        "llm_role_usage": pipeline_result.llm_role_usage,
+                        "llm_calls_detail": pipeline_result.llm_calls_detail,
                     },
-                }, ensure_ascii=False))
-
-            except Exception as exc:
-                logger.error("WS: ошибка пайплайна | session=%s error=%s", session_id, exc, exc_info=True)
-                await websocket.send_text(json.dumps({
-                    "type": "error",
-                    "content": "Произошла ошибка при обработке запроса. Попробуйте ещё раз.",
                 }, ensure_ascii=False))
 
     except WebSocketDisconnect:
