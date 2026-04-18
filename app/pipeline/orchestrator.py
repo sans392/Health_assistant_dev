@@ -200,14 +200,7 @@ class PipelineOrchestrator:
                 )
 
             # 2. Intent Detection
-            history = (
-                [
-                    {"role": msg.role, "content": msg.content}
-                    for msg in enriched.conversation_history[-3:]
-                ]
-                if enriched.conversation_history
-                else []
-            )
+            history = (enriched.conversation_history or [])[-3:]
             async with tracker.track_stage("intent_stage1"):
                 intent_result = await self._intent_detector.detect(
                     raw_query, llm_registry=llm_registry, history=history,
