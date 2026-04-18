@@ -22,6 +22,7 @@ HTMX-партиалы (фрагменты для data browser):
 Защита: HTTP Basic Auth (shared с api/admin.py).
 """
 
+import json
 import secrets
 from typing import Any
 
@@ -339,6 +340,9 @@ async def admin_log_detail(
             "id": c.id,
             "role": c.role,
             "model": c.model,
+            "endpoint": c.endpoint,
+            "stream": c.stream,
+            "http_status": c.http_status,
             "duration_ms": c.duration_ms,
             "prompt_length": c.prompt_length,
             "response_length": c.response_length,
@@ -346,7 +350,17 @@ async def admin_log_detail(
             "response_preview": (c.response or "")[:200],
             "prompt": c.prompt or "",
             "response": c.response or "",
+            "request_body_json": (
+                json.dumps(c.request_body, ensure_ascii=False, indent=2)
+                if c.request_body is not None else ""
+            ),
+            "response_body_json": (
+                json.dumps(c.response_body, ensure_ascii=False, indent=2)
+                if c.response_body is not None else ""
+            ),
+            "error": c.error,
             "iteration": c.iteration,
+            "timestamp": c.timestamp.isoformat() if c.timestamp else None,
         }
         for c in llm_calls_rows
     ]

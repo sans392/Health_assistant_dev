@@ -190,6 +190,88 @@ class TestLogLLMCalls:
         assert "duration_ms" in item
 
     @pytest.mark.asyncio
+    async def test_call_has_raw_request_response_fields(
+        self, client: AsyncClient, async_db_session: AsyncSession
+    ) -> None:
+        """Новые поля сырых запросов/ответов должны отдаваться API."""
+        from app.models.llm_call import LLMCall
+
+        rid = await _create_pipeline_log(async_db_session)
+        call = LLMCall(
+            id=str(uuid.uuid4()),
+            request_id=rid,
+            role="response",
+            model="qwen2.5:14b",
+            endpoint="/api/generate",
+            stream=True,
+            http_status=200,
+            prompt="Полный промпт без обрезки " * 200,
+            response="Полный ответ",
+            prompt_length=5200,
+            response_length=12,
+            duration_ms=800,
+            request_body={"model": "qwen2.5:14b", "stream": True, "options": {"temperature": 0.7}},
+            response_body={"done": True, "done_reason": "stop", "eval_count": 456},
+            error=None,
+            iteration=None,
+            timestamp=datetime.utcnow(),
+        )
+        async_db_session.add(call)
+        await async_db_session.commit()
+
+        resp = await client.get(f"/api/admin/logs/{rid}/llm-calls", headers=_auth_header())
+        assert resp.status_code == 200
+        item = resp.json()["items"][0]
+        # Новые поля присутствуют
+        assert item["endpoint"] == "/api/generate"
+        assert item["stream"] is True
+        assert item["http_status"] == 200
+        assert item["request_body"]["model"] == "qwen2.5:14b"
+        assert item["response_body"]["done_reason"] == "stop"
+        assert item["response_body"]["eval_count"] == 456
+        assert item["error"] is None
+        # Prompt хранится целиком, без обрезки до 4096
+        assert item["prompt_length"] == 5200
+        assert len(item["prompt"]) > 4096
+
+    @pytest.mark.asyncio
+    async def test_call_with_error(
+        self, client: AsyncClient, async_db_session: AsyncSession
+    ) -> None:
+        """Провалившийся вызов (timeout/HTTP-ошибка) корректно отдаётся API."""
+        from app.models.llm_call import LLMCall
+
+        rid = await _create_pipeline_log(async_db_session)
+        call = LLMCall(
+            id=str(uuid.uuid4()),
+            request_id=rid,
+            role="response",
+            model="qwen2.5:14b",
+            endpoint="/api/generate",
+            stream=False,
+            http_status=None,
+            prompt="test",
+            response=None,
+            prompt_length=4,
+            response_length=0,
+            duration_ms=60000,
+            request_body={"model": "qwen2.5:14b"},
+            response_body=None,
+            error="Timeout после 2 попыток: ReadTimeout",
+            iteration=None,
+            timestamp=datetime.utcnow(),
+        )
+        async_db_session.add(call)
+        await async_db_session.commit()
+
+        resp = await client.get(f"/api/admin/logs/{rid}/llm-calls", headers=_auth_header())
+        item = resp.json()["items"][0]
+        assert item["error"] is not None
+        assert "Timeout" in item["error"]
+        assert item["response_body"] is None
+        assert item["http_status"] is None
+
+    @pytest.mark.asyncio
     async def test_requires_auth(self, client: AsyncClient, async_db_session: AsyncSession) -> None:
         rid = await _create_pipeline_log(async_db_session)
         resp = await client.get(f"/api/admin/logs/{rid}/llm-calls")

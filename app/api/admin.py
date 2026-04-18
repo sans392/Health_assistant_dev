@@ -255,7 +255,12 @@ async def get_log_llm_calls(
     request_id: str,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """LLM-вызовы конкретного запроса (issue #34)."""
+    """LLM-вызовы конкретного запроса.
+
+    В ответе — полный набор полей для каждого вызова Ollama:
+    endpoint, stream, http_status, полный prompt/response без обрезки,
+    сырые request_body / response_body (JSON) и текст ошибки, если есть.
+    """
     calls = (await db.execute(
         select(LLMCall)
         .where(LLMCall.request_id == request_id)
@@ -270,6 +275,9 @@ async def get_log_llm_calls(
                 "id": c.id,
                 "role": c.role,
                 "model": c.model,
+                "endpoint": c.endpoint,
+                "stream": c.stream,
+                "http_status": c.http_status,
                 "duration_ms": c.duration_ms,
                 "prompt_length": c.prompt_length,
                 "response_length": c.response_length,
@@ -277,6 +285,9 @@ async def get_log_llm_calls(
                 "response_preview": (c.response or "")[:200],
                 "prompt": c.prompt or "",
                 "response": c.response or "",
+                "request_body": c.request_body,
+                "response_body": c.response_body,
+                "error": c.error,
                 "iteration": c.iteration,
                 "timestamp": c.timestamp.isoformat() if c.timestamp else None,
             }

@@ -24,6 +24,35 @@
   .llm-expand textarea { width: 100%; font-family: monospace; font-size: 12px; background: transparent;
     border: none; resize: vertical; min-height: 80px; color: #e2e8f0; outline: none; }
   .expand-btn { font-size: 11px; padding: 2px 8px; cursor: pointer; }
+
+  /* Секции внутри раскрытой LLM-карточки */
+  .llm-section { margin-top: 14px; }
+  .llm-section:first-child { margin-top: 0; }
+  .llm-section-title { font-size: 11px; color: var(--pico-muted-color); text-transform: uppercase;
+    letter-spacing: .04em; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+  .llm-section-title .meta { font-family: monospace; font-size: 11px; color: #94a3b8; text-transform: none; letter-spacing: 0; }
+  .llm-subtab-bar { display: flex; gap: 2px; margin-bottom: 8px; }
+  .llm-subtab { background: #161b22; border: 1px solid #30363d; color: #94a3b8; padding: 4px 10px;
+    font-size: 11px; cursor: pointer; border-radius: 4px; }
+  .llm-subtab.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  .llm-subpane { display: none; }
+  .llm-subpane.active { display: block; }
+  .llm-json { width: 100%; font-family: monospace; font-size: 12px; background: #010409;
+    border: 1px solid #30363d; border-radius: 4px; padding: 10px; color: #e6edf3;
+    white-space: pre; overflow-x: auto; max-height: 500px; margin: 0; }
+  .llm-json .k { color: #79c0ff; }     /* keys */
+  .llm-json .s { color: #a5d6ff; }     /* strings */
+  .llm-json .n { color: #ff7b72; }     /* numbers */
+  .llm-json .b { color: #ffa657; }     /* booleans / null */
+  .llm-error-box { background: rgba(248,81,73,.1); border: 1px solid rgba(248,81,73,.35);
+    border-radius: 6px; padding: 10px; color: #f85149; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
+  .llm-copy-btn { background: transparent; border: 1px solid #30363d; color: #94a3b8;
+    font-size: 11px; padding: 2px 8px; cursor: pointer; border-radius: 4px; }
+  .llm-copy-btn:hover { background: #21262d; color: #e6edf3; }
+  .badge-err { background: rgba(248,81,73,.15); color: #f85149; border: 1px solid rgba(248,81,73,.35); }
+  .badge-stream { background: rgba(168,85,247,.15); color: #c084fc; border: 1px solid rgba(168,85,247,.35); }
+  .badge-http-ok { background: rgba(46,160,67,.15); color: #3fb950; border: 1px solid rgba(46,160,67,.35); }
+  .badge-http-err { background: rgba(248,81,73,.15); color: #f85149; border: 1px solid rgba(248,81,73,.35); }
 </style>
 
 <div class="page-header">
@@ -170,40 +199,121 @@
 <!-- Tab: LLM Calls -->
 <div id="tab-llm-calls" class="tab-pane">
   {% if llm_calls %}
+  <p style="font-size:12px;color:var(--pico-muted-color);margin-bottom:12px">
+    Полный лог HTTP-вызовов к Ollama. Каждая строка — один запрос; раскрывающийся блок
+    показывает сырые <code>request_body</code> и <code>response_body</code> (JSON),
+    а также endpoint, HTTP-статус, признак стриминга и текст ошибки (если есть).
+  </p>
   <table>
     <thead>
       <tr>
         <th>#</th>
         <th>Роль</th>
         <th>Модель</th>
+        <th>Endpoint</th>
+        <th>Status</th>
         <th>Duration</th>
-        <th>Prompt len</th>
-        <th>Response len</th>
+        <th>Prompt / Response len</th>
         <th>Preview</th>
         <th></th>
       </tr>
     </thead>
     <tbody>
       {% for call in llm_calls %}
+      {% set status_class = 'badge-http-ok' if call.http_status and 200 <= call.http_status < 300
+                            else ('badge-http-err' if call.http_status else 'badge-info') %}
       <tr class="llm-call-row">
         <td>{{ loop.index }}{% if call.iteration is not none %}<small style="color:var(--pico-muted-color)"> (iter {{ call.iteration }})</small>{% endif %}</td>
-        <td><span class="badge badge-info">{{ call.role }}</span></td>
+        <td>
+          <span class="badge badge-info">{{ call.role }}</span>
+          {% if call.stream %}<span class="badge badge-stream" title="streaming">stream</span>{% endif %}
+          {% if call.error %}<span class="badge badge-err" title="{{ call.error }}">error</span>{% endif %}
+        </td>
         <td style="font-size:12px">{{ call.model }}</td>
+        <td style="font-size:12px"><code>{{ call.endpoint or '—' }}</code></td>
+        <td>
+          {% if call.http_status %}
+          <span class="badge {{ status_class }}">{{ call.http_status }}</span>
+          {% else %}
+          <span style="color:var(--pico-muted-color)">—</span>
+          {% endif %}
+        </td>
         <td>{{ call.duration_ms or '—' }} ms</td>
-        <td>{{ call.prompt_length or 0 }}</td>
-        <td>{{ call.response_length or 0 }}</td>
-        <td class="truncate" style="max-width:200px;font-size:12px;color:var(--pico-muted-color)">{{ call.response_preview }}</td>
+        <td style="font-size:12px">{{ call.prompt_length or 0 }} / {{ call.response_length or 0 }}</td>
+        <td class="truncate" style="max-width:240px;font-size:12px;color:var(--pico-muted-color)">{{ call.response_preview }}</td>
         <td>
           <button class="outline secondary expand-btn" onclick="toggleLLMCall('llm-{{ loop.index }}')">▼</button>
         </td>
       </tr>
       <tr id="llm-{{ loop.index }}-row" style="display:none">
-        <td colspan="8">
+        <td colspan="9">
           <div class="llm-expand" style="display:block">
-            <div style="font-size:11px;color:var(--pico-muted-color);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Prompt</div>
-            <textarea readonly rows="6">{{ call.prompt }}</textarea>
-            <div style="font-size:11px;color:var(--pico-muted-color);text-transform:uppercase;letter-spacing:.04em;margin:10px 0 6px">Response</div>
-            <textarea readonly rows="4">{{ call.response }}</textarea>
+
+            {% if call.error %}
+            <div class="llm-section">
+              <div class="llm-section-title">Error</div>
+              <div class="llm-error-box">{{ call.error }}</div>
+            </div>
+            {% endif %}
+
+            <div class="llm-section">
+              <div class="llm-subtab-bar">
+                <button class="llm-subtab active" data-target="llm-{{ loop.index }}-prompt">Prompt</button>
+                <button class="llm-subtab" data-target="llm-{{ loop.index }}-response">Response</button>
+                <button class="llm-subtab" data-target="llm-{{ loop.index }}-req-json">Raw Request JSON</button>
+                <button class="llm-subtab" data-target="llm-{{ loop.index }}-resp-json">Raw Response JSON</button>
+              </div>
+
+              <div id="llm-{{ loop.index }}-prompt" class="llm-subpane active">
+                <div class="llm-section-title">
+                  <span>Prompt</span>
+                  <span class="meta">{{ call.prompt_length or 0 }} chars</span>
+                  <button class="llm-copy-btn" data-copy-target="llm-{{ loop.index }}-prompt-text">Copy</button>
+                </div>
+                <textarea id="llm-{{ loop.index }}-prompt-text" readonly rows="8">{{ call.prompt }}</textarea>
+              </div>
+
+              <div id="llm-{{ loop.index }}-response" class="llm-subpane">
+                <div class="llm-section-title">
+                  <span>Response</span>
+                  <span class="meta">{{ call.response_length or 0 }} chars</span>
+                  <button class="llm-copy-btn" data-copy-target="llm-{{ loop.index }}-response-text">Copy</button>
+                </div>
+                <textarea id="llm-{{ loop.index }}-response-text" readonly rows="8">{{ call.response }}</textarea>
+              </div>
+
+              <div id="llm-{{ loop.index }}-req-json" class="llm-subpane">
+                <div class="llm-section-title">
+                  <span>Raw HTTP request body</span>
+                  <span class="meta">{{ call.endpoint or '' }}</span>
+                  <button class="llm-copy-btn" data-copy-target="llm-{{ loop.index }}-req-json-code">Copy</button>
+                </div>
+                {% if call.request_body_json %}
+                <pre id="llm-{{ loop.index }}-req-json-code" class="llm-json" data-json>{{ call.request_body_json }}</pre>
+                {% else %}
+                <p style="color:var(--pico-muted-color);font-size:12px">Нет данных (старая запись или не сохранялось).</p>
+                {% endif %}
+              </div>
+
+              <div id="llm-{{ loop.index }}-resp-json" class="llm-subpane">
+                <div class="llm-section-title">
+                  <span>Raw HTTP response body</span>
+                  <span class="meta">
+                    {% if call.http_status %}HTTP {{ call.http_status }}{% endif %}
+                    {% if call.stream %} · streamed{% endif %}
+                  </span>
+                  <button class="llm-copy-btn" data-copy-target="llm-{{ loop.index }}-resp-json-code">Copy</button>
+                </div>
+                {% if call.response_body_json %}
+                <pre id="llm-{{ loop.index }}-resp-json-code" class="llm-json" data-json>{{ call.response_body_json }}</pre>
+                {% else %}
+                <p style="color:var(--pico-muted-color);font-size:12px">
+                  {% if call.error %}Вызов завершился ошибкой — тела ответа нет.
+                  {% else %}Нет данных (старая запись или не сохранялось).{% endif %}
+                </p>
+                {% endif %}
+              </div>
+            </div>
           </div>
         </td>
       </tr>
@@ -298,5 +408,69 @@ function toggleLLMCall(id) {
   const row = document.getElementById(id + '-row');
   if (row) row.style.display = row.style.display === 'none' ? '' : 'none';
 }
+
+// ---------- LLM Calls: sub-tab switching, JSON highlight, copy ----------
+function highlightJson(pre) {
+  const raw = pre.textContent;
+  if (!raw) return;
+  // Базовая подсветка: строки, числа, булевы/null, ключи.
+  const escaped = raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  const highlighted = escaped.replace(
+    /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g,
+    (m, str, colon, bool, num) => {
+      if (str) {
+        return colon
+          ? '<span class="k">' + str + '</span>' + colon
+          : '<span class="s">' + str + '</span>';
+      }
+      if (bool) return '<span class="b">' + bool + '</span>';
+      if (num) return '<span class="n">' + num + '</span>';
+      return m;
+    }
+  );
+  pre.innerHTML = highlighted;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  // Подсветка всех JSON-блоков
+  document.querySelectorAll('pre.llm-json[data-json]').forEach(highlightJson);
+
+  // Переключение подвкладок внутри раскрытого LLM-вызова
+  document.querySelectorAll('.llm-subtab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const bar = btn.parentElement;
+      const targetId = btn.getAttribute('data-target');
+      const scope = bar.closest('.llm-expand');
+      if (!scope) return;
+      scope.querySelectorAll('.llm-subtab').forEach(b => b.classList.remove('active'));
+      scope.querySelectorAll('.llm-subpane').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      const pane = document.getElementById(targetId);
+      if (pane) pane.classList.add('active');
+    });
+  });
+
+  // Copy-to-clipboard
+  document.querySelectorAll('.llm-copy-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const targetId = btn.getAttribute('data-copy-target');
+      const el = document.getElementById(targetId);
+      if (!el) return;
+      const text = el.tagName === 'TEXTAREA' ? el.value : el.textContent;
+      try {
+        await navigator.clipboard.writeText(text);
+        const old = btn.textContent;
+        btn.textContent = 'Copied';
+        setTimeout(() => { btn.textContent = old; }, 1200);
+      } catch (err) {
+        btn.textContent = 'Copy failed';
+      }
+    });
+  });
+});
 </script>
 {% endblock %}

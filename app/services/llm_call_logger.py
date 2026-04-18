@@ -38,6 +38,13 @@ class LLMCallData:
     response_length: int
     duration_ms: int
     iteration: int | None = None
+    # Полная сырая картина HTTP-вызова (см. llm_call.py)
+    endpoint: str | None = None
+    stream: bool | None = None
+    http_status: int | None = None
+    request_body: dict[str, Any] | None = None
+    response_body: dict[str, Any] | None = None
+    error: str | None = None
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
 
@@ -71,6 +78,12 @@ class LLMCallLogger:
         response_length: int,
         duration_ms: int,
         iteration: int | None = None,
+        endpoint: str | None = None,
+        stream: bool | None = None,
+        http_status: int | None = None,
+        request_body: dict[str, Any] | None = None,
+        response_body: dict[str, Any] | None = None,
+        error: str | None = None,
     ) -> None:
         """Добавить запись о LLM-вызове (если трекинг активен)."""
         calls = _current_calls.get(None)
@@ -85,6 +98,12 @@ class LLMCallLogger:
             response_length=response_length,
             duration_ms=int(duration_ms),
             iteration=iteration,
+            endpoint=endpoint,
+            stream=stream,
+            http_status=http_status,
+            request_body=request_body,
+            response_body=response_body,
+            error=error,
         ))
 
     def build_role_usage(self, calls: list[LLMCallData]) -> dict[str, int]:
@@ -118,6 +137,12 @@ class LLMCallLogger:
                     response_length=call_data.response_length,
                     duration_ms=call_data.duration_ms,
                     iteration=call_data.iteration,
+                    endpoint=call_data.endpoint,
+                    stream=call_data.stream,
+                    http_status=call_data.http_status,
+                    request_body=call_data.request_body,
+                    response_body=call_data.response_body,
+                    error=call_data.error,
                     timestamp=call_data.timestamp,
                 ))
             await db.commit()
