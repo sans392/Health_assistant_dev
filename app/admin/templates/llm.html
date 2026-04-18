@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% block title %}LLM Config{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>LLM Role Configuration</h1>
+  <p>Настройка моделей Ollama по ролям. Изменения сохраняются в БД и применяются немедленно.</p>
+</div>
+
+{% if not available_models %}
+<div style="background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.3);border-radius:8px;padding:12px 16px;margin-bottom:20px;font-size:13px;color:#f85149;">
+  ⚠ Ollama недоступен или список моделей пуст. Убедитесь, что Ollama запущен.
+</div>
+{% endif %}
+
+<form id="llm-config-form">
+  <div style="display:grid;gap:16px;margin-bottom:24px;">
+    {% for role in roles %}
+    <article style="padding:20px 24px;border-radius:10px;position:relative;">
+      <div style="display:flex;align-items:flex-start;gap:24px;flex-wrap:wrap;">
+        <div style="min-width:180px;">
+          <div class="section-title" style="margin-top:0;margin-bottom:6px;">{{ role.role }}</div>
+          {% if role.model_loaded %}
+            <span class="badge badge-ok">loaded</span>
+          {% else %}
+            <span class="badge badge-warn">not loaded</span>
+          {% endif %}
+        </div>
+        <div style="flex:1;min-width:240px;">
+          <label style="font-size:11px;color:var(--pico-muted-color);text-transform:uppercase;letter-spacing:.04em;">Model</label>
+          <select name="{{ role.role }}" id="select-{{ role.role }}" style="margin-top:4px;"
+                  onchange="checkModelLoaded('{{ role.role }}', this.value)">
+            {% if role.model not in available_models %}
+              <option value="{{ role.model }}" selected>{{ role.model }} (not in Ollama)</option>
+            {% endif %}
+            {% for m in available_models %}
+              <option value="{{ m }}" {% if m == role.model %}selected{% endif %}>{{ m }}</option>
+            {% endfor %}
+          </select>
+          <div id="warn-{{ role.role }}" style="display:none;font-size:12px;color:#f0883e;margin-top:4px;">
+            ⚠ Выбранная модель не загружена в Ollama
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px;min-width:120px;padding-top:22px;">
+          <button type="button" class="outline" style="font-size:12px;padding:6px 12px;"
+                  onclick="toggleTest('{{ role.role }}')">Test prompt</button>
+        </div>
+      </div>
+
+      <!-- Test prompt area -->
+      <div id="test-{{ role.role }}" style="display:none;margin-top:16px;border-top:1px solid var(--pico-card-border-color);padding-top:16px;">
+        <div style="margin-bottom:8px;">
+          <label style="font-size:11px;color:var(--pico-muted-color);text-transform:uppercase;letter-spacing:.04em;">Test prompt</label>
+          <textarea id="prompt-{{ role.role }}" rows="3" placeholder="Введите тестовый промпт..."
+                    style="font-family:monospace;font-size:13px;margin-top:4px;width:100%;"></textarea>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;">
+          <button type="button" style="font-size:13px;padding:7px 16px;"
+                  onclick="runTest('{{ role.role }}')">Запустить</button>
+          <span id="test-indicator-{{ role.role }}" style="display:none;font-size:13px;color:var(--pico-muted-color);">⏳ Выполняется...</span>
+        </div>
+        <div id="test-result-{{ role.role }}" style="display:none;">
+          <div style="display:flex;gap:16px;margin-bottom:8px;font-size:12px;color:var(--pico-muted-color);">
+            <span id="test-model-{{ role.role }}"></span>
+            <span id="test-duration-{{ role.role }}"></span>
+          </div>
+          <pre class="trace" id="test-response-{{ role.role }}" style="max-height:200px;"></pre>
+        </div>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+
+  <div style="display:flex;gap:12px;align-items:center;">
+    <button type="button" onclick="saveConfig()" style="padding:10px 24px;">Сохранить конфиг</button>
+    <span id="save-indicator" style="display:none;font-size:13px;color:var(--pico-muted-color);">⏳ Сохраняем...</span>
+    <span id="save-ok" style="display:none;font-size:13px;" class="badge badge-ok">✓ Сохранено</span>
+    <span id="save-err" style="display:none;font-size:13px;" class="badge badge-err"></span>
+  </div>
+</form>
+
+<script>
+const loadedModels = new Set({{ available_models | tojson }});
+
+function checkModelLoaded(role, model) {
+  const warn = document.getElementById('warn-' + role);
+  if (!loadedModels.has(model)) {
+    warn.style.display = 'block';
+  } else {
+    warn.style.display = 'none';
+  }
+}
+
+function toggleTest(role) {
+  const el = document.getElementById('test-' + role);
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+async function runTest(role) {
+  const prompt = document.getElementById('prompt-' + role).value.trim();
+  if (!prompt) return;
+  const indicator = document.getElementById('test-indicator-' + role);
+  const resultEl = document.getElementById('test-result-' + role);
+  indicator.style.display = 'inline';
+  resultEl.style.display = 'none';
+
+  try {
+    const creds = btoa('{{ admin_user }}:{{ admin_pass }}');
+    const resp = await fetch('/api/admin/llm/test/' + role, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Basic ' + creds },
+      body: JSON.stringify({ prompt }),
+    });
+    const data = await resp.json();
+    indicator.style.display = 'none';
+    resultEl.style.display = 'block';
+    document.getElementById('test-model-' + role).textContent = 'Модель: ' + (data.model || '—');
+    document.getElementById('test-duration-' + role).textContent = 'Время: ' + (data.duration_ms || 0) + ' мс';
+    document.getElementById('test-response-' + role).textContent =
+      data.status === 'ok' ? data.response : ('Ошибка: ' + data.error);
+  } catch (e) {
+    indicator.style.display = 'none';
+    alert('Ошибка: ' + e.message);
+  }
+}
+
+async function saveConfig() {
+  const saveIndicator = document.getElementById('save-indicator');
+  const saveOk = document.getElementById('save-ok');
+  const saveErr = document.getElementById('save-err');
+  saveIndicator.style.display = 'inline';
+  saveOk.style.display = 'none';
+  saveErr.style.display = 'none';
+
+  const payload = {};
+  document.querySelectorAll('#llm-config-form select').forEach(sel => {
+    payload[sel.name] = sel.value;
+  });
+
+  try {
+    const creds = btoa('{{ admin_user }}:{{ admin_pass }}');
+    const resp = await fetch('/api/admin/llm/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Basic ' + creds },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    saveIndicator.style.display = 'none';
+    if (data.status === 'ok') {
+      saveOk.style.display = 'inline';
+      setTimeout(() => { saveOk.style.display = 'none'; }, 3000);
+    } else {
+      saveErr.textContent = data.detail || 'Ошибка';
+      saveErr.style.display = 'inline';
+    }
+  } catch (e) {
+    saveIndicator.style.display = 'none';
+    saveErr.textContent = e.message;
+    saveErr.style.display = 'inline';
+  }
+}
+
+// Проверить при загрузке
+document.addEventListener('DOMContentLoaded', () => {
+  {% for role in roles %}
+  checkModelLoaded('{{ role.role }}', '{{ role.model }}');
+  {% endfor %}
+});
+</script>
+{% endblock %}

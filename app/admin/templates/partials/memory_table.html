@@ -1,0 +1,39 @@
+{% if records %}
+<div style="overflow-x:auto;">
+  <table>
+    <thead>
+      <tr>
+        <th>Q/A (превью)</th>
+        <th>Пользователь</th>
+        <th>Время</th>
+        <th>Request ID</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in records %}
+      <tr>
+        <td class="truncate" style="max-width:500px;" title="{{ r.text }}">
+          {{ r.text[:120] }}
+        </td>
+        <td style="white-space:nowrap;">{{ r.user_id }}</td>
+        <td style="white-space:nowrap;font-size:12px;">{{ r.timestamp[:19] if r.timestamp else '—' }}</td>
+        <td style="font-size:11px;color:var(--pico-muted-color);">
+          {% if r.request_id %}
+            <a href="/admin/logs/{{ r.request_id }}">{{ r.request_id[:8] }}…</a>
+          {% else %}
+            —
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p style="color:var(--pico-muted-color);margin-top:32px;text-align:center;">
+  Записей не найдено.
+  {% if not selected_user_id %}
+  Выберите пользователя или начните диалог в чате.
+  {% endif %}
+</p>
+{% endif %}
