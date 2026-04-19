@@ -32,6 +32,15 @@ _RECOVERY_KEYWORDS: tuple[str, ...] = (
     "помоги восстановиться",
 )
 
+# Метрики, для ответа по которым нужны динамические данные из БД
+# (daily_facts / activities). Статические поля профиля (вес, рост) сюда
+# не входят — они уже попадают в fast-path через system prompt.
+_DYNAMIC_METRICS: frozenset[str] = frozenset({
+    "heart_rate", "hrv", "шаги", "калории", "сон",
+    "recovery", "strain", "дистанция", "время", "темп",
+    "cadence", "rpe",
+})
+
 
 def _matches(text: str, keywords: tuple[str, ...]) -> bool:
     return any(kw in text for kw in keywords)
@@ -78,8 +87,34 @@ class Router:
 
         query = intent.raw_query.lower()
         intent_name = intent.intent
+        entities = intent.entities or {}
 
-        if intent_name in ("direct_question", "general_chat", "off_topic", "emergency"):
+        if intent_name == "direct_question":
+            # Если спрашивают про динамическую метрику (шаги/HRV/пульс/…) —
+            # без реальных данных из БД ответ будет галлюцинацией. Роутим
+            # в tool_simple, чтобы подтянуть get_activities + get_daily_facts.
+            metric = entities.get("metric")
+            if metric in _DYNAMIC_METRICS:
+                return RouteResult(
+                    route="tool_simple",
+                    fast_path=False,
+                    blocked=False,
+                    block_message=None,
+                    tool_calls=["get_activities", "get_daily_facts"],
+                    modules=None,
+                    reason="direct_question_dynamic_metric",
+                )
+            return RouteResult(
+                route="fast_direct_answer",
+                fast_path=True,
+                blocked=False,
+                block_message=None,
+                tool_calls=None,
+                modules=None,
+                reason="fast_direct_direct_question",
+            )
+
+        if intent_name in ("general_chat", "off_topic", "emergency"):
             return RouteResult(
                 route="fast_direct_answer",
                 fast_path=True,

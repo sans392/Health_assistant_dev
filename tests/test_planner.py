@@ -186,6 +186,98 @@ class TestPlannerPlanMethod:
         assert mock_client.generate.call_count >= 2
         assert result.error is None or result.iterations >= 1
 
+    async def test_tool_results_are_deduplicated_across_iterations(self) -> None:
+        """Повторные вызовы одного и того же tool мёржатся в одну запись.
+
+        Без этого Response Generator получает 5 копий daily_facts и
+        раздувает system prompt дублями.
+        """
+        agent = PlannerAgent()
+        agent._max_iterations = 3
+        db = _make_db()
+
+        response = '{"thought":"ещё","tool_calls":[{"tool":"get_daily_facts","args":{"days":7}}]}'
+        mock_client = MagicMock()
+        mock_client.generate = AsyncMock(return_value=_make_llm_response(response))
+
+        # Возвращаем пересекающиеся наборы: один общий ключ, один уникальный
+        # на итерацию — ожидаем, что в merged будет дедуп по iso_date.
+        call_idx = 0
+
+        async def mock_execute_tool(tool_name, args, user_id, query, sport_type, db):
+            nonlocal call_idx
+            call_idx += 1
+            return [
+                {"iso_date": "2026-04-13", "steps": 8099},
+                {"iso_date": f"2026-04-{13 + call_idx}", "steps": 1000 * call_idx},
+            ]
+
+        agent._execute_tool = mock_execute_tool
+
+        with patch("app.pipeline.planner.llm_registry") as mock_registry:
+            mock_registry.get_client.return_value = mock_client
+            result = await agent.plan(
+                query="сколько шагов",
+                user_id="u1",
+                user_context="ctx",
+                entities={},
+                db=db,
+            )
+
+        assert result.iterations == 3
+        assert result.total_tool_calls == 3
+        # raw_iter_results хранит все три итерации отдельно
+        assert len(result.raw_iter_results) == 3
+        # tool_results — одна запись на tool, дедуп по iso_date
+        assert set(result.tool_results.keys()) == {"get_daily_facts"}
+        merged = result.tool_results["get_daily_facts"]
+        dates = sorted(r["iso_date"] for r in merged)
+        assert dates == ["2026-04-13", "2026-04-14", "2026-04-15", "2026-04-16"]
+
+    async def test_tool_data_included_in_next_iteration_prompt(self) -> None:
+        """Сырые данные tool-результата попадают в промпт следующей итерации.
+
+        Без этого LLM не видит ранее полученные данные и зацикливается
+        на повторных вызовах того же tool.
+        """
+        agent = PlannerAgent()
+        agent._max_iterations = 2
+        db = _make_db()
+
+        prompts_seen: list[str] = []
+
+        async def mock_generate(prompt, system_prompt=None, temperature=0.3):
+            prompts_seen.append(prompt)
+            if len(prompts_seen) == 1:
+                return _make_llm_response(
+                    '{"thought":"нужны шаги","tool_calls":'
+                    '[{"tool":"get_daily_facts","args":{"days":1}}]}'
+                )
+            return _make_llm_response('{"thought":"ok","final_answer":true}')
+
+        mock_client = MagicMock()
+        mock_client.generate = AsyncMock(side_effect=mock_generate)
+
+        async def mock_execute_tool(tool_name, args, user_id, query, sport_type, db):
+            return [{"iso_date": "2026-04-18", "steps": 12345}]
+
+        agent._execute_tool = mock_execute_tool
+
+        with patch("app.pipeline.planner.llm_registry") as mock_registry:
+            mock_registry.get_client.return_value = mock_client
+            await agent.plan(
+                query="сколько шагов сегодня",
+                user_id="u1",
+                user_context="ctx",
+                entities={},
+                db=db,
+            )
+
+        assert len(prompts_seen) >= 2
+        # Во второй итерации в промпте должны быть реальные значения
+        assert "12345" in prompts_seen[1]
+        assert "2026-04-18" in prompts_seen[1]
+
     async def test_plan_timeout_sets_flag(self) -> None:
         agent = PlannerAgent()
         agent._timeout = 0.0001  # Ультра-малый таймаут

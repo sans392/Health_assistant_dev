@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 _MAX_ITERATIONS = 5
 _MAX_TOOL_CALLS_PER_ITER = 3
 _TIMEOUT_TOTAL = 120.0  # секунды
+_MAX_TOOL_RESULT_CHARS = 1500  # лимит сырых данных tool в истории итераций
 
 _TOOLS_DESCRIPTION = """\
 - get_activities: тренировки пользователя. args: {"days": int}
@@ -79,6 +80,9 @@ class PlannerResult:
     total_tool_calls: int = 0
     timeout_hit: bool = False
     error: str | None = None
+    # Сырые результаты по итерациям (для логов/отладки). В tool_results
+    # лежит дедуплицированное merged-представление для Response Generator.
+    raw_iter_results: dict[str, Any] = field(default_factory=dict)
 
     @property
     def success(self) -> bool:
@@ -209,9 +213,13 @@ class PlannerAgent:
                         user_id=user_id, query=query,
                         sport_type=sport_type, db=db,
                     )
-                    result.tool_results[f"{tool_name}_iter{iteration}"] = tool_data
+                    result.raw_iter_results[f"{tool_name}_iter{iteration}"] = tool_data
                     result.total_tool_calls += 1
-                    iter_lines.append(f"  {tool_name}: {self._summarize(tool_data)}")
+                    args_str = self._format_args(tool_args)
+                    iter_lines.append(
+                        f"  {tool_name}({args_str}) → {self._summarize(tool_data)}\n"
+                        f"    Данные: {self._format_tool_data_for_prompt(tool_data)}"
+                    )
                     logger.info("PlannerAgent: tool '%s' выполнен | iter=%d", tool_name, iteration)
                     tool_call_logger.record(
                         name=tool_name,
@@ -243,10 +251,18 @@ class PlannerAgent:
                 "\n".join(iter_lines)
             )
 
+        # Дедуплицированный view для Response Generator: одна запись на tool,
+        # списки мёржатся по естественному ключу (id / iso_date / started_at).
+        result.tool_results = self._merge_iter_results(
+            raw_results=result.raw_iter_results,
+            history=result.tool_calls_history,
+        )
+
         logger.info(
-            "PlannerAgent: завершён | iterations=%d tool_calls=%d timeout=%s error=%s | user=%s",
+            "PlannerAgent: завершён | iterations=%d tool_calls=%d merged_tools=%d "
+            "timeout=%s error=%s | user=%s",
             result.iterations, result.total_tool_calls,
-            result.timeout_hit, result.error, user_id,
+            len(result.tool_results), result.timeout_hit, result.error, user_id,
         )
         return result
 
@@ -281,6 +297,91 @@ class PlannerAgent:
             keys = list(data.keys())[:4]
             return "{" + ", ".join(str(k) for k in keys) + ", ...}"
         return str(data)[:100]
+
+    def _format_args(self, args: dict | None) -> str:
+        """Компактное JSON-представление args для истории итераций."""
+        if not args:
+            return ""
+        try:
+            return json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return str(args)
+
+    def _format_tool_data_for_prompt(
+        self, data: Any, max_chars: int = _MAX_TOOL_RESULT_CHARS
+    ) -> str:
+        """Сериализация tool-результата для промпта следующей итерации.
+
+        Без этого LLM не видит, какие данные уже получены, и зацикливается
+        на повторных вызовах одного и того же tool.
+        """
+        if data is None:
+            return "нет данных"
+        try:
+            serialized = json.dumps(data, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            serialized = str(data)
+        if len(serialized) > max_chars:
+            return serialized[:max_chars] + "…(усечено)"
+        return serialized
+
+    @staticmethod
+    def _row_key(row: Any) -> str | None:
+        """Естественный ключ записи для дедупликации списков tool-результатов."""
+        if not isinstance(row, dict):
+            return None
+        for k in ("id", "iso_date", "started_at", "date"):
+            v = row.get(k)
+            if v is not None:
+                return f"{k}={v}"
+        return None
+
+    def _merge_iter_results(
+        self,
+        raw_results: dict[str, Any],
+        history: list[dict],
+    ) -> dict[str, Any]:
+        """Свернуть результаты по итерациям в одну запись на tool.
+
+        Для списков dict'ов делаем дедуп по id / iso_date / started_at.
+        Для скаляров и dict'ов — берём последнее значение.
+        """
+        merged: dict[str, Any] = {}
+        for entry in history:
+            tool = entry.get("tool", "")
+            iter_n = entry.get("iteration")
+            if not tool or iter_n is None:
+                continue
+            key = f"{tool}_iter{iter_n}"
+            if key not in raw_results:
+                continue
+            data = raw_results[key]
+
+            if tool not in merged:
+                # Для списков кладём копию, чтобы не мутировать raw_iter_results
+                merged[tool] = list(data) if isinstance(data, list) else data
+                continue
+
+            existing = merged[tool]
+            if isinstance(existing, list) and isinstance(data, list):
+                seen_keys: set[str] = set()
+                for row in existing:
+                    k = self._row_key(row)
+                    if k is not None:
+                        seen_keys.add(k)
+                for row in data:
+                    k = self._row_key(row)
+                    if k is None:
+                        # Нет естественного ключа — добавляем как есть
+                        existing.append(row)
+                    elif k not in seen_keys:
+                        existing.append(row)
+                        seen_keys.add(k)
+            else:
+                # Несписковые tools (get_user_profile, compute_recovery и т.д.) —
+                # перезаписываем последним значением.
+                merged[tool] = data
+        return merged
 
     async def _execute_tool(
         self,

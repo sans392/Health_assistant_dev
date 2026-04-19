@@ -12,8 +12,18 @@ def router() -> Router:
     return Router()
 
 
-def make_intent(intent: str, confidence: float = 0.9, query: str = "") -> IntentResult:
-    return IntentResult(intent=intent, confidence=confidence, entities={}, raw_query=query)
+def make_intent(
+    intent: str,
+    confidence: float = 0.9,
+    query: str = "",
+    entities: dict | None = None,
+) -> IntentResult:
+    return IntentResult(
+        intent=intent,
+        confidence=confidence,
+        entities=entities or {},
+        raw_query=query,
+    )
 
 
 def make_safety(
@@ -71,6 +81,34 @@ class TestToolSimple:
         assert result.modules is not None
         assert "activity_summary" in result.modules
         assert "trend_analyzer" in result.modules
+
+    def test_direct_question_with_dynamic_metric_uses_tools(self, router: Router) -> None:
+        """direct_question про динамическую метрику → tool_simple (нужны данные БД)."""
+        result = router.route(
+            make_intent("direct_question", entities={"metric": "шаги"}),
+            make_safety(),
+        )
+        assert result.route == "tool_simple"
+        assert result.fast_path is False
+        assert result.tool_calls is not None
+        assert "get_daily_facts" in result.tool_calls
+        assert result.reason == "direct_question_dynamic_metric"
+
+    def test_direct_question_hrv_metric_uses_tools(self, router: Router) -> None:
+        result = router.route(
+            make_intent("direct_question", entities={"metric": "hrv"}),
+            make_safety(),
+        )
+        assert result.route == "tool_simple"
+
+    def test_direct_question_profile_metric_stays_fast(self, router: Router) -> None:
+        """Статические поля профиля (вес, рост) остаются в fast_path."""
+        result = router.route(
+            make_intent("direct_question", entities={"metric": "вес"}),
+            make_safety(),
+        )
+        assert result.route == "fast_direct_answer"
+        assert result.fast_path is True
 
 
 class TestTemplatePlan:
