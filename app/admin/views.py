@@ -22,6 +22,7 @@ HTMX-партиалы (фрагменты для data browser):
 Защита: HTTP Basic Auth (shared с api/admin.py).
 """
 
+import json
 import secrets
 from typing import Any
 
@@ -38,6 +39,7 @@ from app.models.activity import Activity
 from app.models.chat import ChatMessage, ChatSession
 from app.models.daily_fact import DailyFact
 from app.models.pipeline_log import PipelineLog
+from app.models.tool_call import ToolCall
 from app.models.user_profile import UserProfile
 
 router = APIRouter(tags=["admin-ui"])
@@ -302,6 +304,13 @@ async def admin_log_detail(
         .order_by(LLMCall.timestamp)
     )).scalars().all()
 
+    # Tool calls для вкладки Tool Results
+    tool_calls_rows = (await db.execute(
+        select(ToolCall)
+        .where(ToolCall.request_id == request_id)
+        .order_by(ToolCall.timestamp)
+    )).scalars().all()
+
     total_ms = log.total_duration_ms or 1
     stage_trace = log.stage_trace or []
     for stage in stage_trace:
@@ -339,6 +348,9 @@ async def admin_log_detail(
             "id": c.id,
             "role": c.role,
             "model": c.model,
+            "endpoint": c.endpoint,
+            "stream": c.stream,
+            "http_status": c.http_status,
             "duration_ms": c.duration_ms,
             "prompt_length": c.prompt_length,
             "response_length": c.response_length,
@@ -346,9 +358,42 @@ async def admin_log_detail(
             "response_preview": (c.response or "")[:200],
             "prompt": c.prompt or "",
             "response": c.response or "",
+            "request_body_json": (
+                json.dumps(c.request_body, ensure_ascii=False, indent=2)
+                if c.request_body is not None else ""
+            ),
+            "response_body_json": (
+                json.dumps(c.response_body, ensure_ascii=False, indent=2)
+                if c.response_body is not None else ""
+            ),
+            "error": c.error,
             "iteration": c.iteration,
+            "timestamp": c.timestamp.isoformat() if c.timestamp else None,
         }
         for c in llm_calls_rows
+    ]
+
+    tool_calls_list = [
+        {
+            "id": c.id,
+            "name": c.name,
+            "source": c.source,
+            "iteration": c.iteration,
+            "step_id": c.step_id,
+            "success": c.success,
+            "error": c.error,
+            "duration_ms": c.duration_ms,
+            "args_json": (
+                json.dumps(c.args, ensure_ascii=False, indent=2, default=str)
+                if c.args is not None else ""
+            ),
+            "result_json": (
+                json.dumps(c.result, ensure_ascii=False, indent=2, default=str)
+                if c.result is not None else ""
+            ),
+            "timestamp": c.timestamp.isoformat() if c.timestamp else None,
+        }
+        for c in tool_calls_rows
     ]
 
     return templates.TemplateResponse(
@@ -358,6 +403,7 @@ async def admin_log_detail(
             **_base_ctx("logs"),
             "log": log_dict,
             "llm_calls": llm_calls_list,
+            "tool_calls": tool_calls_list,
         },
     )
 

@@ -24,6 +24,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.llm_registry import llm_registry
+from app.services.tool_call_logger import tool_call_logger
 from app.tools.db_tools import get_activities, get_daily_facts, get_user_profile
 from app.tools.rag_retrieve import rag_retrieve
 
@@ -201,6 +202,7 @@ class PlannerAgent:
                     "iteration": iteration, "tool": tool_name, "args": tool_args,
                 })
 
+                tool_start_ms = time.monotonic() * 1000
                 try:
                     tool_data = await self._execute_tool(
                         tool_name=tool_name, args=tool_args,
@@ -211,9 +213,29 @@ class PlannerAgent:
                     result.total_tool_calls += 1
                     iter_lines.append(f"  {tool_name}: {self._summarize(tool_data)}")
                     logger.info("PlannerAgent: tool '%s' выполнен | iter=%d", tool_name, iteration)
+                    tool_call_logger.record(
+                        name=tool_name,
+                        source="planner",
+                        args=tool_args,
+                        result=tool_data,
+                        success=tool_data is not None,
+                        error=None if tool_data is not None else "нет данных / неизвестный tool",
+                        duration_ms=int(time.monotonic() * 1000 - tool_start_ms),
+                        iteration=iteration,
+                    )
                 except Exception as exc:
                     logger.error("PlannerAgent: tool '%s' ошибка: %s", tool_name, exc)
                     iter_lines.append(f"  {tool_name}: ERROR — {exc}")
+                    tool_call_logger.record(
+                        name=tool_name,
+                        source="planner",
+                        args=tool_args,
+                        result=None,
+                        success=False,
+                        error=str(exc),
+                        duration_ms=int(time.monotonic() * 1000 - tool_start_ms),
+                        iteration=iteration,
+                    )
 
             thought = parsed.get("thought", "")
             tool_history.append(

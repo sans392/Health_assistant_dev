@@ -5,12 +5,14 @@
 """
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.tool_call_logger import tool_call_logger
 from app.tools.db_tools import (
     ToolResult,
     get_activities,
@@ -88,6 +90,16 @@ class ToolExecutor:
         executor_result = ToolExecutorResult()
 
         for tool_name in tool_calls:
+            args = self._build_args_snapshot(
+                tool_name=tool_name,
+                user_id=user_id,
+                date_from=date_from,
+                date_to=date_to,
+                sport_type=sport_type,
+                query_text=query_text,
+                entities=entities,
+            )
+            start_ms = time.monotonic() * 1000
             result = await self._dispatch(
                 tool_name=tool_name,
                 user_id=user_id,
@@ -98,9 +110,54 @@ class ToolExecutor:
                 query_text=query_text,
                 entities=entities,
             )
+            duration_ms = int(time.monotonic() * 1000 - start_ms)
+            tool_call_logger.record(
+                name=tool_name,
+                source="tool_executor",
+                args=args,
+                result=result.data if result.success else None,
+                success=result.success,
+                error=result.error,
+                duration_ms=duration_ms,
+            )
             executor_result.results[tool_name] = result
 
         return executor_result
+
+    @staticmethod
+    def _build_args_snapshot(
+        tool_name: str,
+        user_id: str,
+        date_from: date,
+        date_to: date,
+        sport_type: str | None,
+        query_text: str | None,
+        entities: dict | None,
+    ) -> dict[str, Any]:
+        """Собрать snapshot аргументов, с которыми будет вызван tool.
+
+        Используется для записи в tool_calls.args — чтобы в админке было видно,
+        с чем именно tool был вызван (даты, sport_type, top_k, категория и т.д.).
+        """
+        ents = entities or {}
+        base: dict[str, Any] = {
+            "user_id": user_id,
+            "date_from": date_from.isoformat() if date_from else None,
+            "date_to": date_to.isoformat() if date_to else None,
+            "sport_type": sport_type,
+        }
+        if tool_name == "rag_retrieve":
+            base["query_text"] = query_text
+            base["rag_category"] = ents.get("rag_category")
+            base["rag_top_k"] = int(ents.get("rag_top_k", 5))
+        if tool_name in {"compute_recovery", "check_overtraining"}:
+            # эти tools смотрят свои окна, а не date_from/date_to из entities
+            base.pop("date_from", None)
+            base.pop("date_to", None)
+            base["window_days"] = 14 if tool_name == "compute_recovery" else 14
+        if tool_name == "compute_strain":
+            base["reference_date"] = date_to.isoformat() if date_to else None
+        return base
 
     async def _dispatch(
         self,
@@ -287,8 +344,10 @@ class ToolExecutor:
         Returns:
             ToolResult с результатом операции записи.
         """
+        args_snapshot = {"user_id": user_id, **dict(params or {})}
+        start_ms = time.monotonic() * 1000
         if tool_name == "log_activity":
-            return await log_activity(
+            result = await log_activity(
                 db=db,
                 user_id=user_id,
                 sport_type=params.get("sport_type", "other"),
@@ -297,19 +356,29 @@ class ToolExecutor:
                 distance=params.get("distance"),
                 notes=params.get("notes"),
             )
-
-        if tool_name == "update_profile":
-            return await update_profile(
+        elif tool_name == "update_profile":
+            result = await update_profile(
                 db=db,
                 user_id=user_id,
                 field=params.get("field", ""),
                 value=params.get("value"),
             )
-
-        logger.warning("ToolExecutor.execute_action: неизвестный tool '%s'", tool_name)
-        return ToolResult(
-            tool_name=tool_name,
-            success=False,
-            data=None,
-            error=f"Неизвестный write-tool: {tool_name}",
+        else:
+            logger.warning("ToolExecutor.execute_action: неизвестный tool '%s'", tool_name)
+            result = ToolResult(
+                tool_name=tool_name,
+                success=False,
+                data=None,
+                error=f"Неизвестный write-tool: {tool_name}",
+            )
+        duration_ms = int(time.monotonic() * 1000 - start_ms)
+        tool_call_logger.record(
+            name=tool_name,
+            source="tool_executor",
+            args=args_snapshot,
+            result=result.data if result.success else None,
+            success=result.success,
+            error=result.error,
+            duration_ms=duration_ms,
         )
+        return result

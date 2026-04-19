@@ -144,10 +144,12 @@ class OllamaClient:
         Returns:
             LLMResponse.
         """
+        last_exc: Exception | None = None
         for attempt in range(2):
             try:
                 return await self._send_request(endpoint, payload, prompt_for_log)
             except httpx.TimeoutException as exc:
+                last_exc = exc
                 if attempt == 0:
                     logger.warning(
                         "Ollama timeout (attempt %d/2), retrying... endpoint=%s",
@@ -156,7 +158,42 @@ class OllamaClient:
                     )
                     continue
                 logger.error("Ollama timeout after 2 attempts: endpoint=%s", endpoint)
+                self._log_failure(
+                    endpoint=endpoint,
+                    payload=payload,
+                    prompt_for_log=prompt_for_log,
+                    error=f"Timeout после 2 попыток: {exc}",
+                    http_status=None,
+                    duration_ms=0,
+                    stream=False,
+                )
                 raise
+            except httpx.HTTPStatusError as exc:
+                self._log_failure(
+                    endpoint=endpoint,
+                    payload=payload,
+                    prompt_for_log=prompt_for_log,
+                    error=f"HTTP {exc.response.status_code}: {exc.response.text[:500]}",
+                    http_status=exc.response.status_code,
+                    duration_ms=0,
+                    stream=False,
+                )
+                raise
+            except Exception as exc:
+                self._log_failure(
+                    endpoint=endpoint,
+                    payload=payload,
+                    prompt_for_log=prompt_for_log,
+                    error=f"{type(exc).__name__}: {exc}",
+                    http_status=None,
+                    duration_ms=0,
+                    stream=False,
+                )
+                raise
+        # На случай неожиданного выхода из цикла (не должно случиться)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Неожиданный выход из _call_with_retry")
 
     async def _send_request(
         self,
@@ -169,6 +206,7 @@ class OllamaClient:
 
         async with self._make_client() as client:
             resp = await client.post(endpoint, json=payload)
+            http_status = resp.status_code
             resp.raise_for_status()
             data = resp.json()
 
@@ -195,11 +233,16 @@ class OllamaClient:
         llm_call_logger.record(
             role=self._role,
             model=self._model,
-            prompt=prompt_for_log[:4096] if prompt_for_log else None,
-            response=content[:4096] if content else None,
+            prompt=prompt_for_log or None,
+            response=content or None,
             prompt_length=prompt_length,
             response_length=response_length,
             duration_ms=int(duration_ms),
+            endpoint=endpoint,
+            stream=False,
+            http_status=http_status,
+            request_body=payload,
+            response_body=data,
         )
 
         return LLMResponse(
@@ -208,6 +251,33 @@ class OllamaClient:
             prompt_length=prompt_length,
             response_length=response_length,
             duration_ms=round(duration_ms, 1),
+        )
+
+    def _log_failure(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        prompt_for_log: str,
+        error: str,
+        http_status: int | None,
+        duration_ms: int,
+        stream: bool,
+    ) -> None:
+        """Записать в llm_calls провалившийся вызов (timeout/HTTP-ошибка/другое)."""
+        llm_call_logger.record(
+            role=self._role,
+            model=self._model,
+            prompt=prompt_for_log or None,
+            response=None,
+            prompt_length=len(prompt_for_log or ""),
+            response_length=0,
+            duration_ms=duration_ms,
+            endpoint=endpoint,
+            stream=stream,
+            http_status=http_status,
+            request_body=payload,
+            response_body=None,
+            error=error,
         )
 
     async def health_check(self) -> dict[str, Any]:
@@ -297,10 +367,14 @@ class OllamaClient:
 
         start_ms = time.monotonic() * 1000
         full_content: list[str] = []
+        http_status: int | None = None
+        final_chunk: dict[str, Any] | None = None
+        chunk_count = 0
 
         try:
             async with self._make_client() as client:
                 async with client.stream("POST", "/api/generate", json=payload) as response:
+                    http_status = response.status_code
                     response.raise_for_status()
                     async for line in response.aiter_lines():
                         if not line.strip():
@@ -309,15 +383,48 @@ class OllamaClient:
                             chunk = json.loads(line)
                         except json.JSONDecodeError:
                             continue
+                        chunk_count += 1
                         token = chunk.get("response", "")
                         if token:
                             full_content.append(token)
                             if on_token is not None:
                                 on_token(token)
                         if chunk.get("done"):
+                            final_chunk = chunk
                             break
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as exc:
             logger.error("Ollama stream timeout: model=%s", self._model)
+            self._log_failure(
+                endpoint="/api/generate",
+                payload=payload,
+                prompt_for_log=prompt,
+                error=f"Stream timeout: {exc}",
+                http_status=http_status,
+                duration_ms=int(time.monotonic() * 1000 - start_ms),
+                stream=True,
+            )
+            raise
+        except httpx.HTTPStatusError as exc:
+            self._log_failure(
+                endpoint="/api/generate",
+                payload=payload,
+                prompt_for_log=prompt,
+                error=f"Stream HTTP {exc.response.status_code}",
+                http_status=exc.response.status_code,
+                duration_ms=int(time.monotonic() * 1000 - start_ms),
+                stream=True,
+            )
+            raise
+        except Exception as exc:
+            self._log_failure(
+                endpoint="/api/generate",
+                payload=payload,
+                prompt_for_log=prompt,
+                error=f"Stream error {type(exc).__name__}: {exc}",
+                http_status=http_status,
+                duration_ms=int(time.monotonic() * 1000 - start_ms),
+                stream=True,
+            )
             raise
 
         content = "".join(full_content)
@@ -326,6 +433,31 @@ class OllamaClient:
         logger.info(
             "LLM stream: model=%s prompt_len=%d response_len=%d duration_ms=%.1f",
             self._model, len(prompt), len(content), duration_ms,
+        )
+
+        # Для стриминга как response_body сохраняем финальный chunk с метаданными
+        # Ollama (done_reason, eval_count, prompt_eval_count и т.д.) + агрегат.
+        response_body: dict[str, Any] = {
+            "stream": True,
+            "chunks_received": chunk_count,
+            "response": content,
+        }
+        if final_chunk is not None:
+            response_body["final_chunk"] = final_chunk
+
+        llm_call_logger.record(
+            role=self._role,
+            model=self._model,
+            prompt=prompt or None,
+            response=content or None,
+            prompt_length=len(prompt),
+            response_length=len(content),
+            duration_ms=int(duration_ms),
+            endpoint="/api/generate",
+            stream=True,
+            http_status=http_status,
+            request_body=payload,
+            response_body=response_body,
         )
 
         return LLMResponse(

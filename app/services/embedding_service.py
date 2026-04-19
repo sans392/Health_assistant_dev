@@ -6,11 +6,12 @@
 
 import logging
 import time
-from typing import Union
+from typing import Any, Union
 
 import httpx
 
 from app.config import settings
+from app.services.llm_call_logger import llm_call_logger
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,15 @@ class EmbeddingService:
                 logger.error(
                     "Embedding timeout после 2 попыток: model=%s", self._model
                 )
+                self._log_call(
+                    text=text,
+                    payload={"model": self._model, "prompt": text},
+                    duration_ms=0,
+                    http_status=None,
+                    response_body=None,
+                    embedding_dim=0,
+                    error=f"Timeout после 2 попыток: {exc}",
+                )
                 raise ValueError(
                     f"Ошибка получения эмбеддинга: таймаут (model={self._model})"
                 ) from exc
@@ -84,14 +94,26 @@ class EmbeddingService:
     async def _send_request(self, text: str) -> list[float]:
         """Выполнить HTTP запрос к /api/embeddings."""
         start_ms = time.monotonic() * 1000
+        payload = {"model": self._model, "prompt": text}
+        http_status: int | None = None
 
-        async with self._make_client() as client:
-            resp = await client.post(
-                "/api/embeddings",
-                json={"model": self._model, "prompt": text},
+        try:
+            async with self._make_client() as client:
+                resp = await client.post("/api/embeddings", json=payload)
+                http_status = resp.status_code
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPStatusError as exc:
+            self._log_call(
+                text=text,
+                payload=payload,
+                duration_ms=int(time.monotonic() * 1000 - start_ms),
+                http_status=exc.response.status_code,
+                response_body=None,
+                embedding_dim=0,
+                error=f"HTTP {exc.response.status_code}: {exc.response.text[:500]}",
             )
-            resp.raise_for_status()
-            data = resp.json()
+            raise
 
         duration_ms = time.monotonic() * 1000 - start_ms
         embedding: list[float] = data.get("embedding", [])
@@ -104,7 +126,61 @@ class EmbeddingService:
             duration_ms,
         )
 
+        self._log_call(
+            text=text,
+            payload=payload,
+            duration_ms=int(duration_ms),
+            http_status=http_status,
+            response_body=data,
+            embedding_dim=len(embedding),
+            error=None,
+        )
+
         return embedding
+
+    def _log_call(
+        self,
+        text: str,
+        payload: dict[str, Any],
+        duration_ms: int,
+        http_status: int | None,
+        response_body: dict[str, Any] | None,
+        embedding_dim: int,
+        error: str | None,
+    ) -> None:
+        """Записать embedding-вызов в llm_calls (если per-request трекинг активен).
+
+        В response сохраняем не весь вектор (сотни floats), а краткую сводку
+        «[embedding dim=768]» — сам вектор доступен в response_body.
+        """
+        if response_body is not None and isinstance(response_body.get("embedding"), list):
+            # В raw response_body тоже заменяем массив на сводку, чтобы не раздувать хранилище:
+            # полную картину (все float'ы) видеть в админке не нужно, достаточно dim.
+            safe_body = {k: v for k, v in response_body.items() if k != "embedding"}
+            safe_body["embedding_dim"] = embedding_dim
+            safe_body["embedding"] = "<vector omitted>"
+        else:
+            safe_body = response_body
+
+        response_summary = (
+            f"[embedding dim={embedding_dim}]" if embedding_dim and error is None else None
+        )
+
+        llm_call_logger.record(
+            role="embedding",
+            model=self._model,
+            prompt=text or None,
+            response=response_summary,
+            prompt_length=len(text or ""),
+            response_length=embedding_dim,
+            duration_ms=duration_ms,
+            endpoint="/api/embeddings",
+            stream=False,
+            http_status=http_status,
+            request_body=payload,
+            response_body=safe_body,
+            error=error,
+        )
 
     async def check_model_available(self) -> bool:
         """Проверить наличие модели эмбеддингов в Ollama.
