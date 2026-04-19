@@ -50,6 +50,7 @@ from app.models.activity import Activity
 from app.models.daily_fact import DailyFact
 from app.models.llm_call import LLMCall
 from app.models.pipeline_log import PipelineLog
+from app.models.tool_call import ToolCall
 from app.models.user_profile import UserProfile
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -289,6 +290,45 @@ async def get_log_llm_calls(
                 "response_body": c.response_body,
                 "error": c.error,
                 "iteration": c.iteration,
+                "timestamp": c.timestamp.isoformat() if c.timestamp else None,
+            }
+            for c in calls
+        ],
+    }
+
+
+@router.get("/logs/{request_id}/tool-calls", dependencies=[Depends(_require_admin)])
+async def get_log_tool_calls(
+    request_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Tool-вызовы конкретного запроса.
+
+    В ответе — полный набор полей для каждого tool-вызова:
+    name, source (tool_executor / planner / template), iteration, step_id,
+    сырые args / result (JSON) и error, если есть.
+    """
+    calls = (await db.execute(
+        select(ToolCall)
+        .where(ToolCall.request_id == request_id)
+        .order_by(ToolCall.timestamp)
+    )).scalars().all()
+
+    return {
+        "request_id": request_id,
+        "total": len(calls),
+        "items": [
+            {
+                "id": c.id,
+                "name": c.name,
+                "source": c.source,
+                "iteration": c.iteration,
+                "step_id": c.step_id,
+                "args": c.args,
+                "result": c.result,
+                "success": c.success,
+                "error": c.error,
+                "duration_ms": c.duration_ms,
                 "timestamp": c.timestamp.isoformat() if c.timestamp else None,
             }
             for c in calls

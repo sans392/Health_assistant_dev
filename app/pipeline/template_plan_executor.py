@@ -6,12 +6,14 @@
 
 import dataclasses
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.tool_call_logger import tool_call_logger
 from app.tools.db_tools import get_activities, get_daily_facts, get_user_profile
 from app.tools.rag_retrieve import rag_retrieve
 
@@ -109,13 +111,24 @@ class TemplatePlanExecutor:
             template_id, len(steps_def), user_id,
         )
 
-        for step_def in steps_def:
+        for idx, step_def in enumerate(steps_def):
             tool = step_def["tool"]
             args = step_def["args"]
+            step_start_ms = time.monotonic() * 1000
             step = await self._run_step(
                 tool=tool, args=args,
                 user_id=user_id, query_text=query_text,
                 sport_type=sport_type, db=db,
+            )
+            tool_call_logger.record(
+                name=tool,
+                source="template",
+                args=args,
+                result=step.data if step.success else None,
+                success=step.success,
+                error=step.error,
+                duration_ms=int(time.monotonic() * 1000 - step_start_ms),
+                step_id=f"{template_id}:{idx}",
             )
             result.steps.append(step)
 

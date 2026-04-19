@@ -46,6 +46,7 @@ from app.services.data_processing.trend_analyzer import (
 from app.services.llm_call_logger import llm_call_logger
 from app.services.llm_registry import llm_registry
 from app.services.llm_service import ollama_client
+from app.services.tool_call_logger import tool_call_logger
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +190,7 @@ class PipelineOrchestrator:
         request_id = provided_request_id or str(uuid.uuid4())
         tracker = StageTracker(request_id)
         llm_token = llm_call_logger.start()
+        tool_token = tool_call_logger.start()
 
         intent_result = None
 
@@ -229,6 +231,8 @@ class PipelineOrchestrator:
                 await self._save_messages(session_id, user_id, raw_query, response_text, db)
                 llm_calls = llm_call_logger.stop(llm_token)
                 await llm_call_logger.flush_to_db(request_id, llm_calls, db)
+                tool_calls_log = tool_call_logger.stop(tool_token)
+                await tool_call_logger.flush_to_db(request_id, tool_calls_log, db)
                 duration = int(time.monotonic() * 1000 - start_ms)
                 return PipelineResult(
                     response_text=response_text,
@@ -281,6 +285,8 @@ class PipelineOrchestrator:
                 await self._save_messages(session_id, user_id, raw_query, response_text, db)
                 llm_calls = llm_call_logger.stop(llm_token)
                 await llm_call_logger.flush_to_db(request_id, llm_calls, db)
+                tool_calls_log = tool_call_logger.stop(tool_token)
+                await tool_call_logger.flush_to_db(request_id, tool_calls_log, db)
                 asyncio.create_task(memory_updater.update(
                     user_id=user_id,
                     session_id=session_id,
@@ -432,6 +438,8 @@ class PipelineOrchestrator:
 
             llm_calls = llm_call_logger.stop(llm_token)
             await llm_call_logger.flush_to_db(request_id, llm_calls, db)
+            tool_calls_log = tool_call_logger.stop(tool_token)
+            await tool_call_logger.flush_to_db(request_id, tool_calls_log, db)
 
             asyncio.create_task(memory_updater.update(
                 user_id=user_id,
@@ -478,9 +486,13 @@ class PipelineOrchestrator:
             )
 
         except Exception:
-            # Если исключение выше не поймано — очищаем LLM трекинг
+            # Если исключение выше не поймано — очищаем трекинг
             try:
                 llm_call_logger.stop(llm_token)
+            except Exception:
+                pass
+            try:
+                tool_call_logger.stop(tool_token)
             except Exception:
                 pass
             raise

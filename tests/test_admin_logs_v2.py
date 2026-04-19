@@ -279,6 +279,160 @@ class TestLogLLMCalls:
 
 
 # ---------------------------------------------------------------------------
+# Tests: GET /api/admin/logs/{id}/tool-calls
+# ---------------------------------------------------------------------------
+
+class TestLogToolCalls:
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_calls(
+        self, client: AsyncClient, async_db_session: AsyncSession
+    ) -> None:
+        rid = await _create_pipeline_log(async_db_session)
+        resp = await client.get(f"/api/admin/logs/{rid}/tool-calls", headers=_auth_header())
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["request_id"] == rid
+        assert data["total"] == 0
+        assert data["items"] == []
+
+    @pytest.mark.asyncio
+    async def test_returns_tool_call_with_raw_args_and_result(
+        self, client: AsyncClient, async_db_session: AsyncSession
+    ) -> None:
+        """Вызов из tool_executor — отдаются args, result, success, duration."""
+        from app.models.tool_call import ToolCall
+
+        rid = await _create_pipeline_log(async_db_session)
+        call = ToolCall(
+            id=str(uuid.uuid4()),
+            request_id=rid,
+            name="get_activities",
+            source="tool_executor",
+            args={"user_id": "u-1", "date_from": "2026-04-01", "date_to": "2026-04-18"},
+            result=[{"id": "a1", "sport_type": "running", "duration_seconds": 1800}],
+            success=True,
+            error=None,
+            duration_ms=42,
+            iteration=None,
+            step_id=None,
+            timestamp=datetime.utcnow(),
+        )
+        async_db_session.add(call)
+        await async_db_session.commit()
+
+        resp = await client.get(f"/api/admin/logs/{rid}/tool-calls", headers=_auth_header())
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        item = data["items"][0]
+        assert item["name"] == "get_activities"
+        assert item["source"] == "tool_executor"
+        assert item["success"] is True
+        assert item["error"] is None
+        assert item["duration_ms"] == 42
+        assert item["args"]["date_from"] == "2026-04-01"
+        assert isinstance(item["result"], list)
+        assert item["result"][0]["sport_type"] == "running"
+
+    @pytest.mark.asyncio
+    async def test_planner_tool_call_has_iteration(
+        self, client: AsyncClient, async_db_session: AsyncSession
+    ) -> None:
+        """Вызов из planner — сохраняет iteration."""
+        from app.models.tool_call import ToolCall
+
+        rid = await _create_pipeline_log(async_db_session)
+        call = ToolCall(
+            id=str(uuid.uuid4()),
+            request_id=rid,
+            name="rag_retrieve",
+            source="planner",
+            args={"category": "recovery_science", "top_k": 3},
+            result={"chunks": ["c1", "c2"]},
+            success=True,
+            iteration=2,
+            step_id=None,
+            duration_ms=220,
+            timestamp=datetime.utcnow(),
+        )
+        async_db_session.add(call)
+        await async_db_session.commit()
+
+        resp = await client.get(f"/api/admin/logs/{rid}/tool-calls", headers=_auth_header())
+        item = resp.json()["items"][0]
+        assert item["source"] == "planner"
+        assert item["iteration"] == 2
+        assert item["args"]["top_k"] == 3
+
+    @pytest.mark.asyncio
+    async def test_template_tool_call_has_step_id(
+        self, client: AsyncClient, async_db_session: AsyncSession
+    ) -> None:
+        """Вызов из template — сохраняет step_id."""
+        from app.models.tool_call import ToolCall
+
+        rid = await _create_pipeline_log(async_db_session)
+        call = ToolCall(
+            id=str(uuid.uuid4()),
+            request_id=rid,
+            name="compute_recovery",
+            source="template",
+            args={},
+            result={"score": 87.5},
+            success=True,
+            step_id="recovery_report:1",
+            iteration=None,
+            duration_ms=15,
+            timestamp=datetime.utcnow(),
+        )
+        async_db_session.add(call)
+        await async_db_session.commit()
+
+        resp = await client.get(f"/api/admin/logs/{rid}/tool-calls", headers=_auth_header())
+        item = resp.json()["items"][0]
+        assert item["source"] == "template"
+        assert item["step_id"] == "recovery_report:1"
+        assert item["result"]["score"] == 87.5
+
+    @pytest.mark.asyncio
+    async def test_failed_tool_call_has_error_and_null_result(
+        self, client: AsyncClient, async_db_session: AsyncSession
+    ) -> None:
+        """Провалившийся вызов — success=False, error, result=None."""
+        from app.models.tool_call import ToolCall
+
+        rid = await _create_pipeline_log(async_db_session)
+        call = ToolCall(
+            id=str(uuid.uuid4()),
+            request_id=rid,
+            name="rag_retrieve",
+            source="tool_executor",
+            args={"query_text": "test"},
+            result=None,
+            success=False,
+            error="ChromaDB unavailable",
+            duration_ms=1,
+            timestamp=datetime.utcnow(),
+        )
+        async_db_session.add(call)
+        await async_db_session.commit()
+
+        resp = await client.get(f"/api/admin/logs/{rid}/tool-calls", headers=_auth_header())
+        item = resp.json()["items"][0]
+        assert item["success"] is False
+        assert item["error"] == "ChromaDB unavailable"
+        assert item["result"] is None
+
+    @pytest.mark.asyncio
+    async def test_requires_auth(
+        self, client: AsyncClient, async_db_session: AsyncSession
+    ) -> None:
+        rid = await _create_pipeline_log(async_db_session)
+        resp = await client.get(f"/api/admin/logs/{rid}/tool-calls")
+        assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
 # Tests: GET /api/admin/logs/{id}/stage-trace
 # ---------------------------------------------------------------------------
 

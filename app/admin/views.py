@@ -39,6 +39,7 @@ from app.models.activity import Activity
 from app.models.chat import ChatMessage, ChatSession
 from app.models.daily_fact import DailyFact
 from app.models.pipeline_log import PipelineLog
+from app.models.tool_call import ToolCall
 from app.models.user_profile import UserProfile
 
 router = APIRouter(tags=["admin-ui"])
@@ -303,6 +304,13 @@ async def admin_log_detail(
         .order_by(LLMCall.timestamp)
     )).scalars().all()
 
+    # Tool calls для вкладки Tool Results
+    tool_calls_rows = (await db.execute(
+        select(ToolCall)
+        .where(ToolCall.request_id == request_id)
+        .order_by(ToolCall.timestamp)
+    )).scalars().all()
+
     total_ms = log.total_duration_ms or 1
     stage_trace = log.stage_trace or []
     for stage in stage_trace:
@@ -365,6 +373,29 @@ async def admin_log_detail(
         for c in llm_calls_rows
     ]
 
+    tool_calls_list = [
+        {
+            "id": c.id,
+            "name": c.name,
+            "source": c.source,
+            "iteration": c.iteration,
+            "step_id": c.step_id,
+            "success": c.success,
+            "error": c.error,
+            "duration_ms": c.duration_ms,
+            "args_json": (
+                json.dumps(c.args, ensure_ascii=False, indent=2, default=str)
+                if c.args is not None else ""
+            ),
+            "result_json": (
+                json.dumps(c.result, ensure_ascii=False, indent=2, default=str)
+                if c.result is not None else ""
+            ),
+            "timestamp": c.timestamp.isoformat() if c.timestamp else None,
+        }
+        for c in tool_calls_rows
+    ]
+
     return templates.TemplateResponse(
         "log_detail.html",
         {
@@ -372,6 +403,7 @@ async def admin_log_detail(
             **_base_ctx("logs"),
             "log": log_dict,
             "llm_calls": llm_calls_list,
+            "tool_calls": tool_calls_list,
         },
     )
 
