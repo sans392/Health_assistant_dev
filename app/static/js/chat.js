@@ -43,6 +43,7 @@ let currentUserId = 'test-user-001';
 let ws = null;
 let lastDebug = null;
 let streamingBuffer = '';
+let streamingMsgEl = null;
 let streamingContentEl = null;
 let stageCompleted = [];
 let stageActive = null;
@@ -160,15 +161,15 @@ function startStreamingMessage() {
 
     const wrapper = document.createElement('div');
     wrapper.className = 'message assistant';
-    wrapper.id = 'streaming-msg';
     wrapper.innerHTML = `
         <div class="msg-avatar">AI</div>
         <div class="msg-body">
-            <div class="msg-bubble"><span id="stream-content"></span><span class="stream-cursor">▋</span></div>
+            <div class="msg-bubble"><span class="stream-content"></span><span class="stream-cursor">▋</span></div>
             <div class="msg-meta">${nowTime()}</div>
         </div>`;
     messagesEl.appendChild(wrapper);
-    streamingContentEl = document.getElementById('stream-content');
+    streamingMsgEl = wrapper;
+    streamingContentEl = wrapper.querySelector('.stream-content');
 
     // Switch stage indicator to streaming
     stageActive = 'streaming';
@@ -185,14 +186,14 @@ function appendStreamToken(token) {
 }
 
 function finishStreaming(fullText) {
-    const msgEl = document.getElementById('streaming-msg');
-    if (msgEl) {
-        const bubble = msgEl.querySelector('.msg-bubble');
+    if (streamingMsgEl) {
+        const bubble = streamingMsgEl.querySelector('.msg-bubble');
         bubble.innerHTML = renderMarkdown(fullText || streamingBuffer);
     } else if (fullText) {
         // No streaming happened (blocked path etc.) — add as regular message
         appendMessage('assistant', fullText);
     }
+    streamingMsgEl = null;
     streamingContentEl = null;
     streamingBuffer = '';
 }
@@ -366,8 +367,8 @@ function handleWsMessage(data) {
 
         case 'error': {
             resetStageState();
-            const streamEl = document.getElementById('streaming-msg');
-            if (streamEl) streamEl.remove();
+            if (streamingMsgEl) streamingMsgEl.remove();
+            streamingMsgEl = null;
             streamingContentEl = null;
             appendMessage('assistant', '⚠️ ' + (data.message || 'Произошла ошибка'));
             break;
