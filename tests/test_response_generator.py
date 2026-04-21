@@ -150,7 +150,7 @@ class TestResponseGenerator:
         mock_llm = _make_llm_response("Отличный вопрос!")
 
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(return_value=mock_llm)
+        mock_client.chat = AsyncMock(return_value=mock_llm)
 
         with patch("app.pipeline.response_generator.llm_registry") as mock_reg:
             mock_reg.get_client.return_value = mock_client
@@ -170,7 +170,7 @@ class TestResponseGenerator:
         mock_llm = _make_llm_response("Вот ваш план.")
 
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(return_value=mock_llm)
+        mock_client.chat = AsyncMock(return_value=mock_llm)
 
         with patch("app.pipeline.response_generator.llm_registry") as mock_reg:
             mock_reg.get_client.return_value = mock_client
@@ -189,7 +189,7 @@ class TestResponseGenerator:
         mock_llm = _make_llm_response("Анализ данных.")
 
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(return_value=mock_llm)
+        mock_client.chat = AsyncMock(return_value=mock_llm)
 
         with patch("app.pipeline.response_generator.llm_registry") as mock_reg:
             mock_reg.get_client.return_value = mock_client
@@ -200,8 +200,8 @@ class TestResponseGenerator:
             )
             mock_reg.get_client.assert_called_with("response")
 
-    async def test_rag_chunks_in_prompt_for_health_concern(self) -> None:
-        """RAG-чанки добавляются в промпт для health_concern."""
+    async def test_rag_chunks_in_system_block_for_health_concern(self) -> None:
+        """RAG-чанки добавляются в отдельный system-блок для health_concern."""
         generator = ResponseGenerator()
         enriched = _make_enriched_query()
         structured = {
@@ -211,42 +211,48 @@ class TestResponseGenerator:
             ]
         }
 
-        captured_prompts: list[str] = []
+        captured: list[dict] = []
 
-        async def mock_generate(prompt, system_prompt=None, temperature=0.5, max_tokens=600):
-            captured_prompts.append(system_prompt or "")
+        async def mock_chat(messages, system_prompt=None, system_prompts=None,
+                            temperature=0.5, max_tokens=600):
+            captured.append({
+                "messages": messages,
+                "system_prompts": system_prompts or [],
+            })
             return _make_llm_response("Ответ про восстановление")
 
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(side_effect=mock_generate)
+        mock_client.chat = AsyncMock(side_effect=mock_chat)
 
         with patch("app.pipeline.response_generator.llm_registry") as mock_reg:
             mock_reg.get_client.return_value = mock_client
-            result = await generator.generate(
+            await generator.generate(
                 enriched_query=enriched,
                 route="planner",
                 structured_result=structured,
                 intent="health_concern",
             )
 
-        assert len(captured_prompts) == 1
-        assert "recovery_science" in captured_prompts[0]
+        assert len(captured) == 1
+        combined_system = "\n".join(captured[0]["system_prompts"])
+        assert "recovery_science" in combined_system
 
-    async def test_semantic_context_in_prompt(self) -> None:
-        """Semantic context добавляется в промпт."""
+    async def test_semantic_context_in_system_block(self) -> None:
+        """Semantic context добавляется в system-блок."""
         generator = ResponseGenerator()
         enriched = _make_enriched_query(
             semantic_context=[{"text": "прошлый ответ о тренировках", "score": 0.8, "timestamp": "x"}]
         )
 
-        captured_prompts: list[str] = []
+        captured: list[dict] = []
 
-        async def mock_generate(prompt, system_prompt=None, temperature=0.5, max_tokens=600):
-            captured_prompts.append(system_prompt or "")
+        async def mock_chat(messages, system_prompt=None, system_prompts=None,
+                            temperature=0.5, max_tokens=600):
+            captured.append({"system_prompts": system_prompts or []})
             return _make_llm_response("Ответ")
 
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(side_effect=mock_generate)
+        mock_client.chat = AsyncMock(side_effect=mock_chat)
 
         with patch("app.pipeline.response_generator.llm_registry") as mock_reg:
             mock_reg.get_client.return_value = mock_client
@@ -256,14 +262,83 @@ class TestResponseGenerator:
                 intent="data_analysis",
             )
 
-        assert "прошлый ответ" in captured_prompts[0]
+        combined_system = "\n".join(captured[0]["system_prompts"])
+        assert "прошлый ответ" in combined_system
+
+    async def test_standard_path_splits_system_into_three_blocks(self) -> None:
+        """Standard path должен формировать 3 отдельных system-сообщения:
+        базовый промпт, профиль, контекст (tools/RAG/semantic)."""
+        generator = ResponseGenerator()
+        enriched = _make_enriched_query()
+        structured = {"compute_recovery": {"score": 72}}
+
+        captured: list[list[str]] = []
+
+        async def mock_chat(messages, system_prompt=None, system_prompts=None,
+                            temperature=0.5, max_tokens=600):
+            captured.append(list(system_prompts or []))
+            return _make_llm_response("ok")
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(side_effect=mock_chat)
+
+        with patch("app.pipeline.response_generator.llm_registry") as mock_reg:
+            mock_reg.get_client.return_value = mock_client
+            await generator.generate(
+                enriched_query=enriched,
+                route="tool_simple",
+                structured_result=structured,
+                intent="data_analysis",
+            )
+
+        assert len(captured) == 1
+        system_prompts = captured[0]
+        assert len(system_prompts) == 3
+        assert "фитнес-ассистент" in system_prompts[0].lower()
+        assert "пользователе" in system_prompts[1].lower() or "профиль" in system_prompts[1].lower()
+        assert "compute_recovery" in system_prompts[2]
+
+    async def test_conversation_history_passed_as_user_assistant_messages(self) -> None:
+        """История диалога должна передаваться как role=user/assistant, а не в system."""
+        generator = ResponseGenerator()
+        enriched = _make_enriched_query(
+            conversation_history=[
+                {"role": "user", "content": "Привет", "timestamp": "t1"},
+                {"role": "assistant", "content": "Здравствуй!", "timestamp": "t2"},
+            ],
+            normalized_text="как мои дела",
+        )
+
+        captured: list[list[dict]] = []
+
+        async def mock_chat(messages, system_prompt=None, system_prompts=None,
+                            temperature=0.7, max_tokens=300):
+            captured.append([dict(m) for m in messages])
+            return _make_llm_response("Норм")
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(side_effect=mock_chat)
+
+        with patch("app.pipeline.response_generator.llm_registry") as mock_reg:
+            mock_reg.get_client.return_value = mock_client
+            await generator.generate(
+                enriched_query=enriched,
+                route="fast_direct_answer",
+                intent="general_chat",
+            )
+
+        messages = captured[0]
+        # Ожидаем: user="Привет", assistant="Здравствуй!", user="как мои дела"
+        assert messages[0] == {"role": "user", "content": "Привет"}
+        assert messages[1] == {"role": "assistant", "content": "Здравствуй!"}
+        assert messages[-1] == {"role": "user", "content": "как мои дела"}
 
     async def test_safety_warning_appended_for_medium(self) -> None:
         generator = ResponseGenerator()
         enriched = _make_enriched_query()
 
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(return_value=_make_llm_response("Понял."))
+        mock_client.chat = AsyncMock(return_value=_make_llm_response("Понял."))
 
         with patch("app.pipeline.response_generator.llm_registry") as mock_reg:
             mock_reg.get_client.return_value = mock_client
@@ -281,7 +356,7 @@ class TestResponseGenerator:
         enriched = _make_enriched_query()
 
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(return_value=_make_llm_response("Всё хорошо."))
+        mock_client.chat = AsyncMock(return_value=_make_llm_response("Всё хорошо."))
 
         with patch("app.pipeline.response_generator.llm_registry") as mock_reg:
             mock_reg.get_client.return_value = mock_client
@@ -300,8 +375,8 @@ class TestResponseGenerator:
         enriched = _make_enriched_query()
         tokens_received: list[str] = []
 
-        async def mock_generate_stream(prompt, system_prompt=None, temperature=0.7,
-                                       max_tokens=300, on_token=None):
+        async def mock_chat_stream(messages, system_prompt=None, system_prompts=None,
+                                   temperature=0.7, max_tokens=300, on_token=None):
             tokens = ["Привет", " мир", "!"]
             for t in tokens:
                 if on_token:
@@ -309,7 +384,7 @@ class TestResponseGenerator:
             return _make_llm_response("Привет мир!")
 
         mock_client = MagicMock()
-        mock_client.generate_stream = AsyncMock(side_effect=mock_generate_stream)
+        mock_client.chat_stream = AsyncMock(side_effect=mock_chat_stream)
 
         def collect_token(token: str) -> None:
             tokens_received.append(token)
@@ -331,7 +406,7 @@ class TestResponseGenerator:
         enriched = _make_enriched_query()
 
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(side_effect=RuntimeError("Ollama timeout"))
+        mock_client.chat = AsyncMock(side_effect=RuntimeError("Ollama timeout"))
 
         with patch("app.pipeline.response_generator.llm_registry") as mock_reg:
             mock_reg.get_client.return_value = mock_client
@@ -349,7 +424,7 @@ class TestResponseGenerator:
         mock_llm = _make_llm_response("Ответ LLM.")
 
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(return_value=mock_llm)
+        mock_client.chat = AsyncMock(return_value=mock_llm)
 
         with patch("app.pipeline.response_generator.llm_registry") as mock_reg:
             mock_reg.get_client.return_value = mock_client

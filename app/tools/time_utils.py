@@ -1,7 +1,34 @@
 """Утилиты для резолвинга time_range entity в конкретные даты."""
 
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+
+
+_WEEKDAYS_RU = [
+    "понедельник", "вторник", "среда", "четверг",
+    "пятница", "суббота", "воскресенье",
+]
+
+_MONTHS_GEN_RU = [
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+]
+
+
+def current_datetime_str(now: datetime | None = None) -> str:
+    """Текущая дата и время сервера в читаемом русском формате.
+
+    Используется в системных промптах LLM — чтобы модель понимала,
+    что такое «сегодня» / «вчера» / «за последние 7 дней».
+    """
+    dt = now or datetime.now()
+    weekday = _WEEKDAYS_RU[dt.weekday()]
+    month = _MONTHS_GEN_RU[dt.month - 1]
+    return (
+        f"{weekday}, {dt.day} {month} {dt.year}, "
+        f"{dt.strftime('%H:%M')} "
+        f"(ISO: {dt.strftime('%Y-%m-%d %H:%M')})"
+    )
 
 
 def resolve_time_range(time_range_entity: str | None) -> tuple[date, date]:

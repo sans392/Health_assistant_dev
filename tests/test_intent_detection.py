@@ -205,13 +205,13 @@ class TestLLMStage:
     """Тесты LLM stage 2 (LLM fallback при низкой уверенности)."""
 
     def _make_registry(self, json_response: str) -> MagicMock:
-        """Создать mock LLMRegistry, возвращающий заданный JSON."""
+        """Создать mock LLMRegistry, возвращающий заданный JSON через /api/chat."""
         llm_response = MagicMock()
         llm_response.content = json_response
         llm_response.model = "test-model"
 
         client = AsyncMock()
-        client.generate = AsyncMock(return_value=llm_response)
+        client.chat = AsyncMock(return_value=llm_response)
 
         registry = MagicMock()
         registry.get_client.return_value = client
@@ -277,7 +277,7 @@ class TestLLMStage:
     async def test_llm_error_falls_back(self, detector: IntentDetector) -> None:
         """Ошибка LLM-вызова → fallback на rule-based без исключения."""
         client = AsyncMock()
-        client.generate = AsyncMock(side_effect=Exception("Ollama недоступен"))
+        client.chat = AsyncMock(side_effect=Exception("Ollama недоступен"))
 
         registry = MagicMock()
         registry.get_client.return_value = client
@@ -305,7 +305,7 @@ class TestLLMStage:
 
     @pytest.mark.asyncio
     async def test_history_passed_to_llm(self, detector: IntentDetector) -> None:
-        """История диалога передаётся при вызове LLM."""
+        """История диалога передаётся при вызове LLM как role=user/assistant."""
         registry = self._make_registry(
             '{"intent": "data_retrieval", "confidence": 0.88, "entities": {}}'
         )
@@ -313,14 +313,30 @@ class TestLLMStage:
             {"role": "user", "content": "Привет"},
             {"role": "assistant", "content": "Здравствуйте!"},
         ]
-        result = await detector.detect(
+        await detector.detect(
             "покажи что у меня", llm_registry=registry, history=history
         )
-        # LLM должен был получить вызов с историей (verify через generate call)
         client = registry.get_client.return_value
-        call_args = client.generate.call_args
-        assert "Привет" in call_args.kwargs.get("prompt", "") or \
-               "Привет" in (call_args.args[0] if call_args.args else "")
+        call_kwargs = client.chat.call_args.kwargs
+        messages = call_kwargs.get("messages", [])
+        # Ожидаем role=user/assistant в messages с текущим запросом в конце
+        assert {"role": "user", "content": "Привет"} in messages
+        assert {"role": "assistant", "content": "Здравствуйте!"} in messages
+        assert messages[-1] == {"role": "user", "content": "покажи что у меня"}
+
+    @pytest.mark.asyncio
+    async def test_llm_stage_uses_json_format(self, detector: IntentDetector) -> None:
+        """Intent LLM stage 2 должен вызываться с format='json'."""
+        registry = self._make_registry(
+            '{"intent": "data_analysis", "confidence": 0.9, "entities": {}}'
+        )
+        await detector.detect(
+            "хм, интересно что там с показателями", llm_registry=registry
+        )
+        client = registry.get_client.return_value
+        call_kwargs = client.chat.call_args.kwargs
+        assert call_kwargs.get("format") == "json"
+        assert call_kwargs.get("system_prompt")
 
 
 # ---------------------------------------------------------------------------

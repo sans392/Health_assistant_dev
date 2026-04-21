@@ -1,10 +1,10 @@
 """Тесты для утилиты резолвинга time_range (app/tools/time_utils.py)."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
-from app.tools.time_utils import resolve_time_range
+from app.tools.time_utils import current_datetime_str, resolve_time_range
 
 
 @pytest.fixture
@@ -75,3 +75,33 @@ class TestResolveTimeRange:
         for entity in ["сегодня", "вчера", "за неделю", "за месяц", None]:
             date_from, date_to = resolve_time_range(entity)
             assert date_from <= date_to
+
+
+class TestCurrentDatetimeStr:
+    """Тесты current_datetime_str — форматированная дата и время сервера."""
+
+    def test_contains_date_and_time(self) -> None:
+        dt = datetime(2026, 4, 21, 14, 30)
+        result = current_datetime_str(dt)
+        assert "21" in result
+        assert "2026" in result
+        assert "14:30" in result
+        # ISO-блок должен присутствовать для однозначного парсинга моделью
+        assert "2026-04-21" in result
+
+    def test_weekday_in_russian(self) -> None:
+        # 2026-04-21 — вторник
+        dt = datetime(2026, 4, 21, 9, 0)
+        result = current_datetime_str(dt)
+        assert "вторник" in result
+
+    def test_month_in_russian_genitive(self) -> None:
+        dt = datetime(2026, 4, 21, 9, 0)
+        result = current_datetime_str(dt)
+        assert "апреля" in result
+
+    def test_without_arg_uses_current_time(self) -> None:
+        # Без аргумента функция работает и возвращает непустую строку
+        result = current_datetime_str()
+        assert len(result) > 0
+        assert "ISO:" in result
