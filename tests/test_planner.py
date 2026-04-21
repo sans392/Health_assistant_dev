@@ -94,14 +94,14 @@ class TestPlannerPlanMethod:
         ]
         call_count = 0
 
-        async def mock_generate(prompt, system_prompt=None, temperature=0.3):
+        async def mock_chat(messages, system_prompt=None, temperature=0.3, format=None):
             nonlocal call_count
             resp = _make_llm_response(responses[min(call_count, len(responses) - 1)])
             call_count += 1
             return resp
 
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(side_effect=mock_generate)
+        mock_client.chat = AsyncMock(side_effect=mock_chat)
 
         # Мокаем tool execution
         async def mock_execute_tool(tool_name, args, user_id, query, sport_type, db):
@@ -124,6 +124,35 @@ class TestPlannerPlanMethod:
         assert result.total_tool_calls == 1
         assert result.timeout_hit is False
 
+    async def test_plan_uses_chat_api_with_json_format(self) -> None:
+        """Планировщик вызывает /api/chat c format='json'."""
+        agent = PlannerAgent()
+        db = _make_db()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_llm_response(
+            '{"thought":"ok","final_answer":true}'
+        ))
+
+        with patch("app.pipeline.planner.llm_registry") as mock_registry:
+            mock_registry.get_client.return_value = mock_client
+            await agent.plan(
+                query="тест",
+                user_id="u1",
+                user_context="ctx",
+                entities={},
+                db=db,
+            )
+
+        assert mock_client.chat.call_count == 1
+        kwargs = mock_client.chat.call_args.kwargs
+        assert kwargs["format"] == "json"
+        # messages: первый — user с исходным запросом
+        messages = kwargs["messages"]
+        assert messages[0] == {"role": "user", "content": "тест"}
+        # system_prompt передан
+        assert kwargs.get("system_prompt")
+
     async def test_plan_stops_at_max_iterations(self) -> None:
         agent = PlannerAgent()
         agent._max_iterations = 3
@@ -133,7 +162,7 @@ class TestPlannerPlanMethod:
         response = '{"thought": "ещё нужны данные", "tool_calls": [{"tool": "get_user_profile", "args": {}}]}'
 
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(return_value=_make_llm_response(response))
+        mock_client.chat = AsyncMock(return_value=_make_llm_response(response))
 
         async def mock_execute_tool(tool_name, args, user_id, query, sport_type, db):
             return {"name": "Тест"}
@@ -163,14 +192,14 @@ class TestPlannerPlanMethod:
         ]
         call_count = 0
 
-        async def mock_generate(prompt, system_prompt=None, temperature=0.3):
+        async def mock_chat(messages, system_prompt=None, temperature=0.3, format=None):
             nonlocal call_count
             idx = min(call_count, len(responses) - 1)
             call_count += 1
             return _make_llm_response(responses[idx])
 
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(side_effect=mock_generate)
+        mock_client.chat = AsyncMock(side_effect=mock_chat)
 
         with patch("app.pipeline.planner.llm_registry") as mock_registry:
             mock_registry.get_client.return_value = mock_client
@@ -183,7 +212,7 @@ class TestPlannerPlanMethod:
             )
 
         # Второй вызов (retry) должен был вернуть final_answer
-        assert mock_client.generate.call_count >= 2
+        assert mock_client.chat.call_count >= 2
         assert result.error is None or result.iterations >= 1
 
     async def test_tool_results_are_deduplicated_across_iterations(self) -> None:
@@ -198,7 +227,7 @@ class TestPlannerPlanMethod:
 
         response = '{"thought":"ещё","tool_calls":[{"tool":"get_daily_facts","args":{"days":7}}]}'
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(return_value=_make_llm_response(response))
+        mock_client.chat = AsyncMock(return_value=_make_llm_response(response))
 
         # Возвращаем пересекающиеся наборы: один общий ключ, один уникальный
         # на итерацию — ожидаем, что в merged будет дедуп по iso_date.
@@ -234,8 +263,8 @@ class TestPlannerPlanMethod:
         dates = sorted(r["iso_date"] for r in merged)
         assert dates == ["2026-04-13", "2026-04-14", "2026-04-15", "2026-04-16"]
 
-    async def test_tool_data_included_in_next_iteration_prompt(self) -> None:
-        """Сырые данные tool-результата попадают в промпт следующей итерации.
+    async def test_tool_data_included_in_next_iteration_messages(self) -> None:
+        """Сырые данные tool-результата попадают в messages следующей итерации.
 
         Без этого LLM не видит ранее полученные данные и зацикливается
         на повторных вызовах того же tool.
@@ -244,11 +273,12 @@ class TestPlannerPlanMethod:
         agent._max_iterations = 2
         db = _make_db()
 
-        prompts_seen: list[str] = []
+        messages_seen: list[list[dict]] = []
 
-        async def mock_generate(prompt, system_prompt=None, temperature=0.3):
-            prompts_seen.append(prompt)
-            if len(prompts_seen) == 1:
+        async def mock_chat(messages, system_prompt=None, temperature=0.3, format=None):
+            # Сохраняем снимок списка messages на момент вызова.
+            messages_seen.append([dict(m) for m in messages])
+            if len(messages_seen) == 1:
                 return _make_llm_response(
                     '{"thought":"нужны шаги","tool_calls":'
                     '[{"tool":"get_daily_facts","args":{"days":1}}]}'
@@ -256,7 +286,7 @@ class TestPlannerPlanMethod:
             return _make_llm_response('{"thought":"ok","final_answer":true}')
 
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(side_effect=mock_generate)
+        mock_client.chat = AsyncMock(side_effect=mock_chat)
 
         async def mock_execute_tool(tool_name, args, user_id, query, sport_type, db):
             return [{"iso_date": "2026-04-18", "steps": 12345}]
@@ -273,10 +303,14 @@ class TestPlannerPlanMethod:
                 db=db,
             )
 
-        assert len(prompts_seen) >= 2
-        # Во второй итерации в промпте должны быть реальные значения
-        assert "12345" in prompts_seen[1]
-        assert "2026-04-18" in prompts_seen[1]
+        assert len(messages_seen) >= 2
+        # Во второй итерации история должна содержать assistant-ответ планера
+        # и user-сообщение с результатами tools.
+        second_iter_contents = "\n".join(m["content"] for m in messages_seen[1])
+        assert "12345" in second_iter_contents
+        assert "2026-04-18" in second_iter_contents
+        # Есть assistant-ход планера в истории второй итерации
+        assert any(m["role"] == "assistant" for m in messages_seen[1])
 
     async def test_plan_timeout_sets_flag(self) -> None:
         agent = PlannerAgent()
@@ -288,14 +322,14 @@ class TestPlannerPlanMethod:
         # на итерацию 2, где проверка elapsed >= self._timeout выставит
         # timeout_hit. Если бы ответ был final_answer — планер успешно
         # завершился бы на итерации 1 без срабатывания таймаута.
-        async def slow_generate(prompt, system_prompt=None, temperature=0.3):
+        async def slow_chat(messages, system_prompt=None, temperature=0.3, format=None):
             await asyncio.sleep(0.05)
             return _make_llm_response(
                 '{"thought":"нужны данные","tool_calls":[{"tool":"get_user_profile","args":{}}]}'
             )
 
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(side_effect=slow_generate)
+        mock_client.chat = AsyncMock(side_effect=slow_chat)
 
         with patch("app.pipeline.planner.llm_registry") as mock_registry:
             mock_registry.get_client.return_value = mock_client

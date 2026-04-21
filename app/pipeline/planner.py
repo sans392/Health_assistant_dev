@@ -65,8 +65,6 @@ _SYSTEM_PROMPT_TEMPLATE = """\
 Контекст пользователя:
 {user_context}
 
-Запрос: {query}
-
 Максимум {max_tool_calls} tool-вызовов за итерацию. Максимум {max_iterations} итераций."""
 
 
@@ -131,12 +129,15 @@ class PlannerAgent:
         system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(
             tools=_TOOLS_DESCRIPTION,
             user_context=user_context,
-            query=query,
             max_tool_calls=self._max_tool_calls_per_iter,
             max_iterations=self._max_iterations,
         )
 
-        tool_history: list[str] = []
+        # История диалога в chat-формате:
+        # user → исходный запрос, далее assistant (JSON планер) ↔ user (tool results).
+        messages: list[dict[str, str]] = [
+            {"role": "user", "content": query},
+        ]
 
         for iteration in range(1, self._max_iterations + 1):
             elapsed = time.monotonic() - start_time
@@ -148,9 +149,6 @@ class PlannerAgent:
                 result.timeout_hit = True
                 break
 
-            history_str = "\n".join(tool_history) if tool_history else "Нет предыдущих вызовов."
-            prompt = f"История tool-вызовов:\n{history_str}\n\nИтерация {iteration}."
-
             logger.info(
                 "PlannerAgent: итерация %d/%d | elapsed=%.1fs | user=%s",
                 iteration, self._max_iterations, elapsed, user_id,
@@ -159,7 +157,12 @@ class PlannerAgent:
             remaining = max(self._timeout - (time.monotonic() - start_time), 5.0)
             try:
                 llm_response = await asyncio.wait_for(
-                    llm_client.generate(prompt=prompt, system_prompt=system_prompt, temperature=0.3),
+                    llm_client.chat(
+                        messages=messages,
+                        system_prompt=system_prompt,
+                        temperature=0.3,
+                        format="json",
+                    ),
                     timeout=remaining,
                 )
             except asyncio.TimeoutError:
@@ -168,18 +171,34 @@ class PlannerAgent:
                 break
 
             result.iterations = iteration
-            parsed = self._parse_response(llm_response.content)
+            raw_content = llm_response.content
+            parsed = self._parse_response(raw_content)
 
             if parsed is None:
                 logger.warning("PlannerAgent: JSON parse error на итерации %d, retry", iteration)
-                retry_prompt = f"{prompt}\n\nВАЖНО: верни ТОЛЬКО валидный JSON без текста вне JSON."
+                retry_messages = messages + [
+                    {"role": "assistant", "content": raw_content or ""},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Твой предыдущий ответ не был валидным JSON. "
+                            "Верни ТОЛЬКО валидный JSON по схеме, без текста вне JSON."
+                        ),
+                    },
+                ]
                 remaining = max(self._timeout - (time.monotonic() - start_time), 5.0)
                 try:
                     llm_response = await asyncio.wait_for(
-                        llm_client.generate(prompt=retry_prompt, system_prompt=system_prompt, temperature=0.1),
+                        llm_client.chat(
+                            messages=retry_messages,
+                            system_prompt=system_prompt,
+                            temperature=0.1,
+                            format="json",
+                        ),
                         timeout=remaining,
                     )
-                    parsed = self._parse_response(llm_response.content)
+                    raw_content = llm_response.content
+                    parsed = self._parse_response(raw_content)
                 except asyncio.TimeoutError:
                     result.timeout_hit = True
                     break
@@ -188,6 +207,11 @@ class PlannerAgent:
                     logger.error("PlannerAgent: повторная ошибка парсинга на итерации %d", iteration)
                     result.error = f"JSON parse error на итерации {iteration}"
                     break
+
+            # Ответ планировщика фиксируем в истории в компактной JSON-форме,
+            # чтобы модель видела свои предыдущие решения и не зацикливалась.
+            assistant_json = self._serialize_assistant_turn(parsed)
+            messages.append({"role": "assistant", "content": assistant_json})
 
             if parsed.get("final_answer"):
                 logger.info("PlannerAgent: final_answer на итерации %d", iteration)
@@ -198,7 +222,7 @@ class PlannerAgent:
                 logger.info("PlannerAgent: пустой tool_calls на итерации %d — завершаем", iteration)
                 break
 
-            iter_lines: list[str] = []
+            tool_results_payload: list[dict] = []
             for tc in tool_calls:
                 tool_name = tc.get("tool", "")
                 tool_args = tc.get("args", {})
@@ -215,11 +239,11 @@ class PlannerAgent:
                     )
                     result.raw_iter_results[f"{tool_name}_iter{iteration}"] = tool_data
                     result.total_tool_calls += 1
-                    args_str = self._format_args(tool_args)
-                    iter_lines.append(
-                        f"  {tool_name}({args_str}) → {self._summarize(tool_data)}\n"
-                        f"    Данные: {self._format_tool_data_for_prompt(tool_data)}"
-                    )
+                    tool_results_payload.append({
+                        "tool": tool_name,
+                        "args": tool_args,
+                        "result": self._truncate_tool_data(tool_data),
+                    })
                     logger.info("PlannerAgent: tool '%s' выполнен | iter=%d", tool_name, iteration)
                     tool_call_logger.record(
                         name=tool_name,
@@ -233,7 +257,11 @@ class PlannerAgent:
                     )
                 except Exception as exc:
                     logger.error("PlannerAgent: tool '%s' ошибка: %s", tool_name, exc)
-                    iter_lines.append(f"  {tool_name}: ERROR — {exc}")
+                    tool_results_payload.append({
+                        "tool": tool_name,
+                        "args": tool_args,
+                        "error": str(exc),
+                    })
                     tool_call_logger.record(
                         name=tool_name,
                         source="planner",
@@ -245,11 +273,13 @@ class PlannerAgent:
                         iteration=iteration,
                     )
 
-            thought = parsed.get("thought", "")
-            tool_history.append(
-                f"Итерация {iteration}:\n  Мысль: {thought}\n  Вызовы:\n" +
-                "\n".join(iter_lines)
+            # Результаты tools отправляем как следующее user-сообщение.
+            user_turn = json.dumps(
+                {"tool_results": tool_results_payload},
+                ensure_ascii=False,
+                default=str,
             )
+            messages.append({"role": "user", "content": user_turn})
 
         # Дедуплицированный view для Response Generator: одна запись на tool,
         # списки мёржатся по естественному ключу (id / iso_date / started_at).
@@ -298,32 +328,31 @@ class PlannerAgent:
             return "{" + ", ".join(str(k) for k in keys) + ", ...}"
         return str(data)[:100]
 
-    def _format_args(self, args: dict | None) -> str:
-        """Компактное JSON-представление args для истории итераций."""
-        if not args:
-            return ""
-        try:
-            return json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
-        except (TypeError, ValueError):
-            return str(args)
-
-    def _format_tool_data_for_prompt(
+    def _truncate_tool_data(
         self, data: Any, max_chars: int = _MAX_TOOL_RESULT_CHARS
-    ) -> str:
-        """Сериализация tool-результата для промпта следующей итерации.
+    ) -> Any:
+        """Усечь результат tool перед отправкой обратно в chat-историю.
 
-        Без этого LLM не видит, какие данные уже получены, и зацикливается
-        на повторных вызовах одного и того же tool.
+        Без ограничения LLM получает раздутый контекст и зацикливается.
+        Для сериализуемых структур, чей JSON превышает max_chars, возвращаем
+        строку-маркер; иначе — исходный объект.
         """
         if data is None:
-            return "нет данных"
+            return None
         try:
             serialized = json.dumps(data, ensure_ascii=False, default=str)
         except (TypeError, ValueError):
-            serialized = str(data)
+            return str(data)[:max_chars]
         if len(serialized) > max_chars:
             return serialized[:max_chars] + "…(усечено)"
-        return serialized
+        return data
+
+    def _serialize_assistant_turn(self, parsed: dict) -> str:
+        """Сериализовать разобранный JSON-ответ планера для истории чата."""
+        try:
+            return json.dumps(parsed, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return str(parsed)
 
     @staticmethod
     def _row_key(row: Any) -> str | None:

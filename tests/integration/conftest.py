@@ -1,7 +1,7 @@
 """Фикстуры для интеграционных тестов Orchestrator v2 (Issue #37).
 
 Предоставляет:
-- mock_ollama: подменяет OllamaClient.generate/generate_stream/list_models,
+- mock_ollama: подменяет OllamaClient.generate/generate_stream/chat/chat_stream/list_models,
   возвращает заранее заготовленные ответы per-role (поддерживает streaming).
 - mock_chroma: отключает ChromaDB (vector_store.available=False), так что
   semantic_memory.recall / rag_retrieve возвращают пустые списки без сетевых вызовов.
@@ -90,12 +90,17 @@ def mock_ollama(monkeypatch: pytest.MonkeyPatch) -> Iterator[MockOllama]:
     """Подменяет OllamaClient.* методы и сбрасывает кеш LLMRegistry."""
     mock = MockOllama()
 
+    def _messages_to_prompt(messages: list[dict[str, str]]) -> str:
+        """Склеить messages в единую строку для логирования и трассировки промптов."""
+        return "\n".join(f"{m.get('role', '')}: {m.get('content', '')}" for m in messages)
+
     async def fake_generate(
         self: OllamaClient,
         prompt: str,
         system_prompt: str | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
+        format: str | None = None,
     ) -> LLMResponse:
         role = self._role
         content = mock.next_response(role)
@@ -150,6 +155,77 @@ def mock_ollama(monkeypatch: pytest.MonkeyPatch) -> Iterator[MockOllama]:
             duration_ms=1.0,
         )
 
+    async def fake_chat(
+        self: OllamaClient,
+        messages: list[dict[str, str]],
+        system_prompt: str | None = None,
+        system_prompts: list[str] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        format: str | None = None,
+    ) -> LLMResponse:
+        role = self._role
+        content = mock.next_response(role)
+        prompt_str = _messages_to_prompt(messages)
+        sp_combined = (
+            "\n".join(system_prompts) if system_prompts else (system_prompt or None)
+        )
+        mock.record_prompt(role, prompt_str, sp_combined)
+        model = self._model or "mock-model"
+        llm_call_logger.record(
+            role=role,
+            model=model,
+            prompt=prompt_str[:4096] if prompt_str else None,
+            response=content[:4096] if content else None,
+            prompt_length=len(prompt_str),
+            response_length=len(content or ""),
+            duration_ms=1,
+        )
+        return LLMResponse(
+            content=content,
+            model=model,
+            prompt_length=len(prompt_str),
+            response_length=len(content or ""),
+            duration_ms=1.0,
+        )
+
+    async def fake_chat_stream(
+        self: OllamaClient,
+        messages: list[dict[str, str]],
+        system_prompt: str | None = None,
+        system_prompts: list[str] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        on_token: Callable[[str], None] | None = None,
+    ) -> LLMResponse:
+        role = self._role
+        content = mock.next_response(role)
+        prompt_str = _messages_to_prompt(messages)
+        sp_combined = (
+            "\n".join(system_prompts) if system_prompts else (system_prompt or None)
+        )
+        mock.record_prompt(role, prompt_str, sp_combined)
+        model = self._model or "mock-model"
+        if on_token is not None:
+            for token in content:
+                on_token(token)
+        llm_call_logger.record(
+            role=role,
+            model=model,
+            prompt=prompt_str[:4096] if prompt_str else None,
+            response=content[:4096] if content else None,
+            prompt_length=len(prompt_str),
+            response_length=len(content or ""),
+            duration_ms=1,
+        )
+        return LLMResponse(
+            content=content,
+            model=model,
+            prompt_length=len(prompt_str),
+            response_length=len(content or ""),
+            duration_ms=1.0,
+        )
+
     async def fake_list_models(self: OllamaClient) -> list[str]:
         return ["mock-model"]
 
@@ -158,6 +234,8 @@ def mock_ollama(monkeypatch: pytest.MonkeyPatch) -> Iterator[MockOllama]:
 
     monkeypatch.setattr(OllamaClient, "generate", fake_generate)
     monkeypatch.setattr(OllamaClient, "generate_stream", fake_generate_stream)
+    monkeypatch.setattr(OllamaClient, "chat", fake_chat)
+    monkeypatch.setattr(OllamaClient, "chat_stream", fake_chat_stream)
     monkeypatch.setattr(OllamaClient, "list_models", fake_list_models)
     monkeypatch.setattr(OllamaClient, "health_check", fake_health_check)
 

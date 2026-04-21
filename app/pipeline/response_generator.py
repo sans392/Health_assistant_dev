@@ -6,6 +6,13 @@
 - Semantic context из enriched_query.semantic_context
 - Token streaming через Ollama API (on_token callback)
 - Улучшенные правила промпта: данные с числами, anomaly_flags, честный fallback
+
+Формат запроса к Ollama — `/api/chat` со структурированной историей:
+  system  — базовые инструкции ассистента
+  system  — профиль пользователя
+  system  — (опционально) tool/RAG/semantic контекст
+  user / assistant ... — история диалога
+  user    — текущий запрос пользователя
 """
 
 import json
@@ -28,28 +35,16 @@ _SAFETY_WARNING_SUFFIX = (
 _PLANNER_ROLE_INTENTS = {"plan_request"}
 _RAG_INTENTS = {"plan_request", "health_concern", "data_analysis"}
 
-_SYSTEM_PROMPT_TEMPLATE = """Ты — дружелюбный фитнес-ассистент. Отвечай на русском.
-
-## Профиль пользователя
-{user_profile}
-
-## История разговора
-{conversation_history}
-
-{rag_block}{semantic_block}## Результаты анализа
-{structured_result}
-
-## Запрос пользователя
-{normalized_text}
+_BASE_SYSTEM_PROMPT = """Ты — дружелюбный фитнес-ассистент. Отвечай на русском.
 
 Правила ответа:
-- Используй ТОЛЬКО данные из «Результаты анализа»
-- Упоминай anomaly_flags если они есть (например: «твоё HRV сегодня ниже обычного»)
-- Ссылайся на конкретные числа и даты
-- Если данных нет — скажи об этом честно: «недостаточно данных»
-- Тон: дружелюбный тренер, не врач
-- Форматируй в Markdown: краткий вывод → подробности → рекомендации
-- Максимум ~500 токенов"""
+- Используй ТОЛЬКО данные из раздела «Результаты анализа» (отдельное system-сообщение).
+- Упоминай anomaly_flags если они есть (например: «твоё HRV сегодня ниже обычного»).
+- Ссылайся на конкретные числа и даты.
+- Если данных нет — скажи об этом честно: «недостаточно данных».
+- Тон: дружелюбный тренер, не врач.
+- Форматируй в Markdown: краткий вывод → подробности → рекомендации.
+- Максимум ~500 токенов."""
 
 _FAST_PATH_SYSTEM = """Ты — дружелюбный фитнес-ассистент. Отвечай на русском.
 Будь конкретен и краток. Максимум ~200 токенов."""
@@ -86,6 +81,55 @@ def _format_conversation_history(history: list[dict]) -> str:
         content = msg.get("content", "")[:200]
         lines.append(f"{role}: {content}")
     return "\n".join(lines)
+
+
+def _build_chat_history(history: list[dict], max_messages: int = 5) -> list[dict[str, str]]:
+    """Преобразовать сохранённую историю в chat-формат role=user/assistant.
+
+    Фильтруем только user/assistant, пропускаем прочие служебные роли.
+    Берём последние `max_messages` сообщений.
+    """
+    if not history:
+        return []
+    converted: list[dict[str, str]] = []
+    for msg in history[-max_messages:]:
+        role = msg.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = msg.get("content") or ""
+        if not content:
+            continue
+        converted.append({"role": role, "content": content})
+    return converted
+
+
+def _build_user_profile_system(profile: dict | None) -> str:
+    """Собрать отдельный system-блок «Информация о пользователе»."""
+    return "## Информация о пользователе\n" + _format_user_profile(profile)
+
+
+def _build_context_system(
+    structured_result: dict | None,
+    rag_chunks: list[dict],
+    semantic_context: list,
+) -> str | None:
+    """Собрать дополнительный system-блок c данными tools / RAG / semantic memory.
+
+    Возвращает None, если никаких дополнительных данных нет — тогда system
+    для tool/RAG-контекста не добавляется вовсе.
+    """
+    parts: list[str] = []
+    if rag_chunks:
+        parts.append(_format_rag_block(rag_chunks).rstrip())
+    if semantic_context:
+        parts.append(_format_semantic_block(semantic_context).rstrip())
+    if structured_result:
+        parts.append(
+            "## Результаты анализа\n" + _format_structured_result(structured_result)
+        )
+    if not parts:
+        return None
+    return "\n\n".join(parts)
 
 
 def _format_structured_result(structured_result: dict | None) -> str:
@@ -186,21 +230,23 @@ class ResponseGenerator:
         safety_level: str,
         on_token: Callable[[str], None] | None,
     ) -> GeneratorResult:
-        """Fast path: короткий ответ без данных (greeting, off_topic, general_question)."""
-        profile_str = _format_user_profile(enriched_query.user_profile)
-        history_str = _format_conversation_history(enriched_query.conversation_history)
+        """Fast path: короткий ответ без данных (greeting, off_topic, general_question).
 
-        prompt = (
-            f"Профиль пользователя:\n{profile_str}\n\n"
-            f"История разговора:\n{history_str}\n\n"
-            f"Запрос: {enriched_query.normalized_text}"
-        )
+        Формирует два system-сообщения (базовая инструкция + профиль) и
+        передаёт историю диалога + текущий запрос как role=user/assistant.
+        """
+        system_prompts = [
+            _FAST_PATH_SYSTEM,
+            _build_user_profile_system(enriched_query.user_profile),
+        ]
+        messages = _build_chat_history(enriched_query.conversation_history)
+        messages.append({"role": "user", "content": enriched_query.normalized_text})
 
         llm_client = llm_registry.get_client("response")
         llm_response = await self._call_llm(
             llm_client=llm_client,
-            prompt=prompt,
-            system_prompt=_FAST_PATH_SYSTEM,
+            messages=messages,
+            system_prompts=system_prompts,
             temperature=0.7,
             max_tokens=300,
             on_token=on_token,
@@ -226,36 +272,42 @@ class ResponseGenerator:
         intent: str,
         on_token: Callable[[str], None] | None,
     ) -> GeneratorResult:
-        """Standard path: ответ с данными из tool/template/planner executor."""
-        profile_str = _format_user_profile(enriched_query.user_profile)
-        history_str = _format_conversation_history(enriched_query.conversation_history)
-        result_str = _format_structured_result(structured_result)
+        """Standard path: ответ с данными из tool/template/planner executor.
 
-        rag_block = ""
+        Три system-блока:
+          1. Базовый промпт (правила ответа).
+          2. Информация о пользователе.
+          3. (Опционально) RAG / semantic memory / результаты tools.
+        История диалога передаётся через role=user/assistant.
+        """
+        rag_chunks: list[dict] = []
         if intent in _RAG_INTENTS:
             rag_chunks = _extract_rag_chunks(structured_result)
             if enriched_query.knowledge_context:
                 rag_chunks = list(enriched_query.knowledge_context) + rag_chunks
-            rag_block = _format_rag_block(rag_chunks)
 
-        semantic_block = _format_semantic_block(enriched_query.semantic_context)
-
-        system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(
-            user_profile=profile_str,
-            conversation_history=history_str,
-            rag_block=rag_block,
-            semantic_block=semantic_block,
-            structured_result=result_str,
-            normalized_text=enriched_query.normalized_text,
+        system_prompts: list[str] = [
+            _BASE_SYSTEM_PROMPT,
+            _build_user_profile_system(enriched_query.user_profile),
+        ]
+        context_system = _build_context_system(
+            structured_result=structured_result,
+            rag_chunks=rag_chunks,
+            semantic_context=enriched_query.semantic_context,
         )
+        if context_system:
+            system_prompts.append(context_system)
+
+        messages = _build_chat_history(enriched_query.conversation_history)
+        messages.append({"role": "user", "content": enriched_query.normalized_text})
 
         role = _select_role(intent)
         llm_client = llm_registry.get_client(role)
 
         llm_response = await self._call_llm(
             llm_client=llm_client,
-            prompt=enriched_query.normalized_text,
-            system_prompt=system_prompt,
+            messages=messages,
+            system_prompts=system_prompts,
             temperature=0.5,
             max_tokens=600,
             on_token=on_token,
@@ -277,26 +329,26 @@ class ResponseGenerator:
     async def _call_llm(
         self,
         llm_client: object,
-        prompt: str,
-        system_prompt: str,
+        messages: list[dict[str, str]],
+        system_prompts: list[str],
         temperature: float,
         max_tokens: int,
         on_token: Callable[[str], None] | None,
     ) -> LLMResponse:
-        """Вызвать LLM (streaming или non-streaming), с fallback при ошибке."""
+        """Вызвать LLM через /api/chat (streaming или non-streaming), с fallback при ошибке."""
         try:
             if on_token is not None:
-                return await llm_client.generate_stream(
-                    prompt=prompt,
-                    system_prompt=system_prompt,
+                return await llm_client.chat_stream(
+                    messages=messages,
+                    system_prompts=system_prompts,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     on_token=on_token,
                 )
             else:
-                return await llm_client.generate(
-                    prompt=prompt,
-                    system_prompt=system_prompt,
+                return await llm_client.chat(
+                    messages=messages,
+                    system_prompts=system_prompts,
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )

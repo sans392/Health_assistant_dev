@@ -249,19 +249,13 @@ def _parse_llm_json(text: str) -> dict | None:
     return None
 
 
-def _build_llm_prompt(query: str, history: list[dict] | None) -> str:
-    """Собрать промпт для LLM stage 2."""
-    history_text = ""
-    if history:
-        recent = history[-3:]  # последние 3 сообщения
-        lines = []
-        for msg in recent:
-            role = "Пользователь" if msg.get("role") == "user" else "Ассистент"
-            content = msg.get("content", "")[:200]
-            lines.append(f"{role}: {content}")
-        history_text = "\n".join(lines)
+_INTENT_SYSTEM_PROMPT = """\
+Ты классифицируешь намерение пользователя фитнес-ассистента.
+Ответь строго в JSON-формате (без текста вне JSON):
+{"intent": "...", "confidence": 0.0, "entities": {}}
 
-    intents_desc = """- data_retrieval: запрос исторических данных о тренировках и активностях
+Доступные намерения:
+- data_retrieval: запрос исторических данных о тренировках и активностях
 - plan_request: просьба составить план тренировок или программу
 - health_concern: жалоба на боль, дискомфорт, травму или плохое самочувствие
 - data_analysis: запрос анализа, сравнения, динамики или прогресса тренировок
@@ -270,18 +264,23 @@ def _build_llm_prompt(query: str, history: list[dict] | None) -> str:
 - emergency: экстренная ситуация, острая боль, угроза жизни
 - off_topic: вопрос не по теме здоровья и фитнеса"""
 
-    history_block = (
-        f"\nПоследние сообщения диалога:\n{history_text}\n"
-        if history_text else ""
-    )
 
-    return (
-        f"Определи намерение пользователя. Ответь строго в формате JSON.\n\n"
-        f"Доступные намерения:\n{intents_desc}\n"
-        f"{history_block}\n"
-        f"Текущий запрос: {query}\n\n"
-        f'Ответ JSON (только JSON, без пояснений): {{"intent": "...", "confidence": 0.0, "entities": {{}}}}'
-    )
+def _build_intent_messages(
+    query: str, history: list[dict] | None
+) -> list[dict[str, str]]:
+    """Собрать messages для /api/chat: history (до 3 последних) + текущий запрос."""
+    messages: list[dict[str, str]] = []
+    if history:
+        for msg in history[-3:]:
+            role = msg.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            content = (msg.get("content") or "")[:200]
+            if not content:
+                continue
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": query})
+    return messages
 
 
 class IntentDetector:
@@ -323,16 +322,18 @@ class IntentDetector:
         llm_registry: "LLMRegistry",
         history: list[dict] | None,
     ) -> IntentResult:
-        """Stage 2: LLM-уточнение намерения."""
-        prompt = _build_llm_prompt(query, history)
+        """Stage 2: LLM-уточнение намерения через /api/chat с format=json."""
+        messages = _build_intent_messages(query, history)
         start_ms = time.monotonic() * 1000
 
         try:
             client = llm_registry.get_client("intent_llm")
-            llm_response = await client.generate(
-                prompt=prompt,
+            llm_response = await client.chat(
+                messages=messages,
+                system_prompt=_INTENT_SYSTEM_PROMPT,
                 temperature=0.1,
                 max_tokens=200,
+                format="json",
             )
         except Exception as exc:
             logger.warning(
