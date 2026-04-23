@@ -235,3 +235,44 @@ async def test_safety_block_chest_pain(mock_ollama, mock_chroma, test_db) -> Non
     await test_db.commit()
     assert await _count_llm_calls(test_db) == 0
     assert result.llm_role_usage == {}
+
+
+# ---------------------------------------------------------------------------
+# 6. HRV today — structured summary + baseline annotation (Issue #56)
+# ---------------------------------------------------------------------------
+
+
+async def test_hrv_today_prompt_has_baseline_pct(mock_ollama, mock_chroma, test_db) -> None:
+    """Запрос про показатели недели должен получить system-промпт с «% от базы»:
+    response_generator не сериализует голый JSON, а строит structured summary
+    с baseline-сравнением (Issue #56). Синтетические daily_facts в test_db
+    содержат растущий HRV — baseline отличается от latest, значит в промпте
+    должно появиться «% от базы»."""
+    mock_ollama.set("response", "Твои показатели недели в норме.")
+
+    result = await pipeline_orchestrator.process_query(
+        user_id="user-test",
+        session_id="sess-hrv",
+        raw_query="Проанализируй мои показатели за неделю",
+        db=test_db,
+    )
+
+    assert result.blocked is False
+    assert result.intent == "data_query"
+    # route может быть tool_simple (get_daily_facts) — структура передаётся в RG
+
+    # В system-промпте должно быть упоминание % от базы (baseline comparison)
+    system_prompts: list[str] = []
+    for recorded in mock_ollama.prompts:
+        sp = recorded.get("system_prompt")
+        if sp:
+            system_prompts.append(sp)
+
+    combined = "\n".join(system_prompts)
+    # Главный acceptance criterion: «% от базы» присутствует
+    assert "% от базы" in combined, (
+        "Ожидаем, что response_generator добавит baseline-сравнение "
+        f"в system prompt, но получили:\n{combined[:2000]}"
+    )
+    # Голый JSON-дамп не должен уходить в промпт
+    assert '"iso_date"' not in combined

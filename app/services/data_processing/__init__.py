@@ -23,6 +23,16 @@ from app.services.data_processing.overtraining_detection import (
     OvertrainingResult,
     detect_overtraining,
 )
+from app.services.data_processing.summary_builder import (
+    ActivityPromptSummary,
+    MetricSummary,
+    annotate_anomalies,
+    build_activity_summary,
+    build_metric_summary,
+    format_activity_summary,
+    format_metric_summary,
+    format_structured_block,
+)
 
 __all__ = [
     "ActivitySummary",
@@ -40,4 +50,12 @@ __all__ = [
     "compute_strain_score",
     "OvertrainingResult",
     "detect_overtraining",
+    "ActivityPromptSummary",
+    "MetricSummary",
+    "annotate_anomalies",
+    "build_activity_summary",
+    "build_metric_summary",
+    "format_activity_summary",
+    "format_metric_summary",
+    "format_structured_block",
 ]

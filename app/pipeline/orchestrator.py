@@ -423,6 +423,12 @@ class PipelineOrchestrator:
                     errors.append(f"PlannerAgent: {exc}")
 
             # 10. Response Generator
+            # Lazy-fetch 30-дневного baseline daily_facts — только если в
+            # structured_result есть daily-метрики (Issue #56). Для
+            # активность-only/RAG-only маршрутов фетч пропускается.
+            baseline_facts = await self._load_baseline_facts(
+                user_id=user_id, structured_result=structured_result, db=db,
+            )
             try:
                 async with tracker.track_stage("response_gen"):
                     generator_result = await self._response_generator.generate(
@@ -432,6 +438,7 @@ class PipelineOrchestrator:
                         safety_level=safety_result.safety_level,
                         intent=intent_result.intent,
                         on_token=on_token,
+                        baseline_facts=baseline_facts,
                     )
                 llm_calls_count += 1
                 response_text = generator_result.content
@@ -512,6 +519,65 @@ class PipelineOrchestrator:
         profile_str = _format_user_profile(enriched.user_profile)
         history_str = _format_conversation_history(enriched.conversation_history)
         return f"Профиль:\n{profile_str}\n\nИстория:\n{history_str}"
+
+    @staticmethod
+    def _structured_has_daily_facts(structured_result: dict | None) -> bool:
+        """True если где-то в structured_result есть daily_facts-подобный список."""
+        if not structured_result:
+            return False
+
+        def _looks_like_facts(value: object) -> bool:
+            return (
+                isinstance(value, list)
+                and bool(value)
+                and isinstance(value[0], dict)
+                and "iso_date" in value[0]
+            )
+
+        for key, value in structured_result.items():
+            if "daily_facts" in key and _looks_like_facts(value):
+                return True
+            if _looks_like_facts(value):
+                return True
+            if isinstance(value, dict):
+                for inner_key, inner_val in value.items():
+                    if "daily_facts" in inner_key and _looks_like_facts(inner_val):
+                        return True
+                    if _looks_like_facts(inner_val):
+                        return True
+        return False
+
+    async def _load_baseline_facts(
+        self,
+        user_id: str,
+        structured_result: dict | None,
+        db: AsyncSession,
+    ) -> list[dict] | None:
+        """Загрузить 30-дневное окно daily_facts для baseline-сравнения.
+
+        Вызывается лениво: фетч выполняется только если в `structured_result`
+        есть daily-метрики, на которых имеет смысл считать отклонения.
+        Ошибка тихо проглатывается — baseline опционален.
+        """
+        from datetime import date, timedelta
+        from app.tools.db_tools import get_daily_facts
+
+        if not self._structured_has_daily_facts(structured_result):
+            return None
+
+        today = date.today()
+        try:
+            res = await get_daily_facts(
+                db=db,
+                user_id=user_id,
+                date_from=today - timedelta(days=29),
+                date_to=today,
+            )
+            if res.success and res.data:
+                return list(res.data)
+        except Exception as exc:
+            logger.warning("Orchestrator: baseline fetch ошибка: %s", exc)
+        return None
 
     def _run_data_module(
         self,

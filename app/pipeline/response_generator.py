@@ -21,6 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.pipeline.context_builder import EnrichedQuery
+from app.services.data_processing.summary_builder import format_structured_block
 from app.services.llm_registry import llm_registry
 from app.services.llm_service import LLMResponse
 from app.tools.time_utils import current_datetime_str
@@ -127,6 +128,7 @@ def _build_context_system(
     structured_result: dict | None,
     rag_chunks: list[dict],
     semantic_context: list,
+    baseline_facts: list[dict] | None = None,
 ) -> str | None:
     """Собрать дополнительный system-блок c данными tools / RAG / semantic memory.
 
@@ -143,20 +145,42 @@ def _build_context_system(
     stripped = _strip_presented_keys(structured_result, strip_rag=bool(rag_chunks))
     if stripped:
         parts.append(
-            "## Результаты анализа\n" + _format_structured_result(stripped)
+            "## Результаты анализа\n"
+            + _format_structured_result(stripped, baseline_facts=baseline_facts)
         )
     if not parts:
         return None
     return "\n\n".join(parts)
 
 
-def _format_structured_result(structured_result: dict | None) -> str:
+# Лимит fallback-JSON — ключи, которые summary_builder не умеет форматировать,
+# сериализуются в усечённый JSON (см. acceptance criteria Issue #56).
+_FALLBACK_JSON_LIMIT = 500
+
+
+def _format_structured_result(
+    structured_result: dict | None,
+    baseline_facts: list[dict] | None = None,
+) -> str:
+    """Форматировать structured_result для system-блока.
+
+    Вместо голого JSON-дампа (Issue #56) используем summary_builder —
+    он рендерит метрики/активности с baseline-сравнением и аномалиями.
+    Для структур, которые билдер не покрывает, сохраняется fallback на
+    усечённый JSON (первые 500 символов).
+    """
     if not structured_result:
         return "Данных нет."
+    rendered = format_structured_block(structured_result, baseline_facts=baseline_facts)
+    if rendered:
+        return rendered
+    # Защита от структур, где summary_builder не произвёл ни одной строки —
+    # возвращаем truncated JSON, чтобы не терять данные.
     try:
-        return json.dumps(structured_result, ensure_ascii=False, indent=2)
+        dump = json.dumps(structured_result, ensure_ascii=False)
     except (TypeError, ValueError):
-        return str(structured_result)
+        dump = str(structured_result)
+    return dump[:_FALLBACK_JSON_LIMIT]
 
 
 def _is_rag_key(key: str) -> bool:
@@ -264,6 +288,7 @@ class ResponseGenerator:
         safety_level: str = "ok",
         intent: str = "general_chat",
         on_token: Callable[[str], None] | None = None,
+        baseline_facts: list[dict] | None = None,
     ) -> GeneratorResult:
         """Сгенерировать ответ на запрос пользователя.
 
@@ -274,6 +299,7 @@ class ResponseGenerator:
             safety_level: Уровень безопасности (ok / medium_priority).
             intent: Намерение пользователя (для выбора роли LLM).
             on_token: Callback для каждого токена стрима (опционально).
+            baseline_facts: 30-дневное окно daily_facts для baseline-сравнения.
 
         Returns:
             GeneratorResult с текстом ответа и метриками LLM.
@@ -288,6 +314,7 @@ class ResponseGenerator:
             safety_level=safety_level,
             intent=intent,
             on_token=on_token,
+            baseline_facts=baseline_facts,
         )
 
     async def _generate_fast_path(
@@ -337,6 +364,7 @@ class ResponseGenerator:
         safety_level: str,
         intent: str,
         on_token: Callable[[str], None] | None,
+        baseline_facts: list[dict] | None = None,
     ) -> GeneratorResult:
         """Standard path: ответ с данными из tool/template/planner executor.
 
@@ -360,6 +388,7 @@ class ResponseGenerator:
             structured_result=structured_result,
             rag_chunks=rag_chunks,
             semantic_context=enriched_query.semantic_context,
+            baseline_facts=baseline_facts,
         )
         if context_system:
             system_prompts.append(context_system)
