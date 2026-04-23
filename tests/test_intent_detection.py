@@ -20,15 +20,15 @@ class TestIntentClassification:
     """Тесты классификации намерений."""
 
     @pytest.mark.asyncio
-    async def test_data_retrieval_show_workouts(self, detector: IntentDetector) -> None:
+    async def test_data_query_show_workouts(self, detector: IntentDetector) -> None:
         result = await detector.detect("Покажи тренировки за неделю")
-        assert result.intent == "data_retrieval"
+        assert result.intent == "data_query"
         assert result.confidence >= 0.85
 
     @pytest.mark.asyncio
-    async def test_data_retrieval_give_activities(self, detector: IntentDetector) -> None:
+    async def test_data_query_give_activities(self, detector: IntentDetector) -> None:
         result = await detector.detect("Дай историю занятий")
-        assert result.intent == "data_retrieval"
+        assert result.intent == "data_query"
         assert result.confidence >= 0.85
 
     @pytest.mark.asyncio
@@ -68,15 +68,15 @@ class TestIntentClassification:
         assert result.confidence >= 0.8
 
     @pytest.mark.asyncio
-    async def test_data_analysis_progress(self, detector: IntentDetector) -> None:
+    async def test_data_query_progress(self, detector: IntentDetector) -> None:
         result = await detector.detect("Проанализируй прогресс в беге")
-        assert result.intent == "data_analysis"
+        assert result.intent == "data_query"
         assert result.confidence >= 0.85
 
     @pytest.mark.asyncio
-    async def test_data_analysis_trend(self, detector: IntentDetector) -> None:
+    async def test_data_query_trend(self, detector: IntentDetector) -> None:
         result = await detector.detect("Покажи динамику моих тренировок")
-        assert result.intent == "data_analysis"
+        assert result.intent == "data_query"
         assert result.confidence >= 0.85
 
     @pytest.mark.asyncio
@@ -233,13 +233,13 @@ class TestLLMStage:
     async def test_low_confidence_calls_llm(self, detector: IntentDetector) -> None:
         """Низкая уверенность → LLM вызывается и возвращает корректный intent."""
         registry = self._make_registry(
-            '{"intent": "data_analysis", "confidence": 0.9, "entities": {}}'
+            '{"intent": "data_query", "confidence": 0.9, "entities": {}}'
         )
         # Неоднозначный запрос → rule-based даст низкую уверенность
         result = await detector.detect(
             "хм, интересно что там с моими показателями", llm_registry=registry
         )
-        assert result.intent == "data_analysis"
+        assert result.intent == "data_query"
         assert result.llm_used is True
         assert result.confidence == 0.9
 
@@ -260,9 +260,10 @@ class TestLLMStage:
             "непонятный запрос без ключевых слов", llm_registry=registry
         )
         assert result.llm_used is False  # fallback сработал
-        assert result.intent in {"general_chat", "data_analysis", "data_retrieval",
+        assert result.intent in {"general_chat", "data_query",
                                   "plan_request", "health_concern", "direct_question",
-                                  "emergency", "off_topic"}
+                                  "emergency", "off_topic",
+                                  "reference_question", "capability_question"}
 
     @pytest.mark.asyncio
     async def test_llm_unknown_intent_falls_back(self, detector: IntentDetector) -> None:
@@ -291,7 +292,7 @@ class TestLLMStage:
     ) -> None:
         """Entities из LLM объединяются с rule-based; rule-based имеет приоритет."""
         registry = self._make_registry(
-            '{"intent": "data_analysis", "confidence": 0.85, '
+            '{"intent": "data_query", "confidence": 0.85, '
             '"entities": {"metric": "hrv", "extra": "value"}}'
         )
         # sport_type "бег" → rule-based найдёт running
@@ -307,7 +308,7 @@ class TestLLMStage:
     async def test_history_passed_to_llm(self, detector: IntentDetector) -> None:
         """История диалога передаётся при вызове LLM как role=user/assistant."""
         registry = self._make_registry(
-            '{"intent": "data_retrieval", "confidence": 0.88, "entities": {}}'
+            '{"intent": "data_query", "confidence": 0.88, "entities": {}}'
         )
         history = [
             {"role": "user", "content": "Привет"},
@@ -328,7 +329,7 @@ class TestLLMStage:
     async def test_llm_stage_uses_json_format(self, detector: IntentDetector) -> None:
         """Intent LLM stage 2 должен вызываться с format='json'."""
         registry = self._make_registry(
-            '{"intent": "data_analysis", "confidence": 0.9, "entities": {}}'
+            '{"intent": "data_query", "confidence": 0.9, "entities": {}}'
         )
         await detector.detect(
             "хм, интересно что там с показателями", llm_registry=registry
@@ -358,10 +359,10 @@ class TestParseJson:
         assert result["intent"] == "health_concern"
 
     def test_json_embedded_in_text(self) -> None:
-        text = 'Вот мой ответ: {"intent": "data_analysis", "confidence": 0.75} и всё.'
+        text = 'Вот мой ответ: {"intent": "data_query", "confidence": 0.75} и всё.'
         result = _parse_llm_json(text)
         assert result is not None
-        assert result["intent"] == "data_analysis"
+        assert result["intent"] == "data_query"
 
     def test_invalid_text_returns_none(self) -> None:
         result = _parse_llm_json("Я не могу определить намерение.")

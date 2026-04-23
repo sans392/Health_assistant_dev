@@ -63,8 +63,8 @@ class TestSelectRole:
     def test_health_concern_uses_response_role(self) -> None:
         assert _select_role("health_concern") == "response"
 
-    def test_data_analysis_uses_response_role(self) -> None:
-        assert _select_role("data_analysis") == "response"
+    def test_data_query_uses_response_role(self) -> None:
+        assert _select_role("data_query") == "response"
 
     def test_general_chat_uses_response_role(self) -> None:
         assert _select_role("general_chat") == "response"
@@ -272,7 +272,7 @@ class TestResponseGenerator:
             # Для plan_request должен запрашиваться "planner" клиент
             mock_reg.get_client.assert_called_with("planner")
 
-    async def test_standard_path_uses_response_role_for_data_analysis(self) -> None:
+    async def test_standard_path_uses_response_role_for_data_query(self) -> None:
         generator = ResponseGenerator()
         enriched = _make_enriched_query()
         mock_llm = _make_llm_response("Анализ данных.")
@@ -285,7 +285,7 @@ class TestResponseGenerator:
             await generator.generate(
                 enriched_query=enriched,
                 route="tool_simple",
-                intent="data_analysis",
+                intent="data_query",
             )
             mock_reg.get_client.assert_called_with("response")
 
@@ -348,7 +348,7 @@ class TestResponseGenerator:
             await generator.generate(
                 enriched_query=enriched,
                 route="tool_simple",
-                intent="data_analysis",
+                intent="data_query",
             )
 
         combined_system = "\n".join(captured[0]["system_prompts"])
@@ -377,7 +377,7 @@ class TestResponseGenerator:
                 enriched_query=enriched,
                 route="tool_simple",
                 structured_result=structured,
-                intent="data_analysis",
+                intent="data_query",
             )
 
         assert len(captured) == 1

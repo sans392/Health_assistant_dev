@@ -91,7 +91,7 @@ async def _create_pipeline_log(
         user_id="u-test",
         session_id="s-test",
         raw_query="тестовый запрос",
-        intent="data_retrieval",
+        intent="data_query",
         route="tool_simple",
         total_duration_ms=500,
         stage_trace=stage_trace or [],

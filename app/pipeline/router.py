@@ -1,16 +1,19 @@
 """Модуль маршрутизации запроса (Phase 2, Issue #28).
 
 4 маршрута:
-- fast_direct_answer : greeting / off_topic / general_question — без tools
-- tool_simple        : data_retrieval / data_analysis — прямые tool-calls
+- fast_direct_answer : greeting / off_topic / capability_question — без tools
+- tool_simple        : data_query / reference_question — прямые tool-calls
 - template_plan      : plan_request / health_concern с ключевыми словами → шаблон
-- planner            : сложные plan_request / неоднозначные health_concern → LLM loop
+- planner            : сложные plan_request / неоднозначные health_concern,
+                       сложные data_query (breakdown / compare) → LLM loop
 """
 
 from dataclasses import dataclass
 
+from app.pipeline.capability_answer import build_capability_answer
 from app.pipeline.intent_detection import IntentResult
 from app.pipeline.safety_check import SafetyResult
+from app.tools.schemas import AnalysisType
 
 _BLOCKED_ROUTE = "blocked"
 
@@ -58,6 +61,10 @@ class RouteResult:
     modules: list[str] | None          # Модули data processing для tool_simple
     template_id: str | None = None      # ID шаблона для template_plan
     reason: str = ""                    # Причина выбора маршрута (для логов)
+    # Статический ответ (минует LLM). Используется для capability_question,
+    # где ответ детерминирован и не требует генерации. Orchestrator должен
+    # проверять это поле раньше вызова ResponseGenerator.
+    static_response: str | None = None
 
 
 class Router:
@@ -125,27 +132,33 @@ class Router:
                 reason=f"fast_direct_{intent_name}",
             )
 
-        if intent_name == "data_retrieval":
+        if intent_name == "capability_question":
+            # Мета-вопрос «что ты умеешь» — статический ответ, без LLM.
             return RouteResult(
-                route="tool_simple",
-                fast_path=False,
+                route="fast_direct_answer",
+                fast_path=True,
                 blocked=False,
                 block_message=None,
-                tool_calls=["get_activities", "get_daily_facts"],
+                tool_calls=None,
                 modules=None,
-                reason="data_retrieval",
+                reason="capability_question_static",
+                static_response=build_capability_answer(),
             )
 
-        if intent_name == "data_analysis":
+        if intent_name == "reference_question":
+            # FAQ — берём знания из RAG, без тяжёлых DB-тулов.
             return RouteResult(
                 route="tool_simple",
                 fast_path=False,
                 blocked=False,
                 block_message=None,
-                tool_calls=["get_activities", "get_daily_facts"],
-                modules=["activity_summary", "trend_analyzer"],
-                reason="data_analysis",
+                tool_calls=["rag_retrieve"],
+                modules=None,
+                reason="reference_question",
             )
+
+        if intent_name == "data_query":
+            return self._route_data_query(intent)
 
         if intent_name == "plan_request":
             return self._route_plan_request(query)
@@ -161,6 +174,39 @@ class Router:
             tool_calls=None,
             modules=None,
             reason=f"fallback_{intent_name}",
+        )
+
+    def _route_data_query(self, intent: IntentResult) -> RouteResult:
+        """Маршрутизировать data_query по analysis_type.
+
+        NONE / NORM_CHECK / TREND → tool_simple (retrieval ± лёгкие модули).
+        BREAKDOWN / COMPARE       → planner (сложный многошаговый анализ).
+        """
+        analysis_type = intent.slots.analysis_type
+
+        if analysis_type in (AnalysisType.BREAKDOWN, AnalysisType.COMPARE):
+            return RouteResult(
+                route="planner",
+                fast_path=False,
+                blocked=False,
+                block_message=None,
+                tool_calls=None,
+                modules=None,
+                reason=f"data_query_{analysis_type.value}",
+            )
+
+        modules: list[str] | None = None
+        if analysis_type in (AnalysisType.NORM_CHECK, AnalysisType.TREND):
+            modules = ["activity_summary", "trend_analyzer"]
+
+        return RouteResult(
+            route="tool_simple",
+            fast_path=False,
+            blocked=False,
+            block_message=None,
+            tool_calls=["get_activities", "get_daily_facts"],
+            modules=modules,
+            reason=f"data_query_{analysis_type.value}",
         )
 
     def _route_plan_request(self, query: str) -> RouteResult:

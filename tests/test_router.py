@@ -5,6 +5,7 @@ import pytest
 from app.pipeline.intent_detection import IntentResult
 from app.pipeline.router import Router, RouteResult
 from app.pipeline.safety_check import SafetyResult
+from app.pipeline.slot_state import slot_state_from_entities
 
 
 @pytest.fixture
@@ -18,11 +19,13 @@ def make_intent(
     query: str = "",
     entities: dict | None = None,
 ) -> IntentResult:
+    ents = entities or {}
     return IntentResult(
         intent=intent,
         confidence=confidence,
-        entities=entities or {},
+        entities=ents,
         raw_query=query,
+        slots=slot_state_from_entities(ents, raw_query=query),
     )
 
 
@@ -68,15 +71,19 @@ class TestFastPath:
 class TestToolSimple:
     """Тесты tool_simple маршрута."""
 
-    def test_data_retrieval_tool_simple(self, router: Router) -> None:
-        result = router.route(make_intent("data_retrieval"), make_safety())
+    def test_data_query_plain_retrieval_tool_simple(self, router: Router) -> None:
+        """data_query без analysis_type → tool_simple без модулей."""
+        result = router.route(make_intent("data_query"), make_safety())
         assert result.route == "tool_simple"
         assert result.fast_path is False
         assert result.tool_calls is not None
         assert "get_activities" in result.tool_calls
+        assert result.modules is None
 
-    def test_data_analysis_tool_simple_with_modules(self, router: Router) -> None:
-        result = router.route(make_intent("data_analysis"), make_safety())
+    def test_data_query_trend_tool_simple_with_modules(self, router: Router) -> None:
+        """data_query с analysis_type=trend → tool_simple + data processing modules."""
+        intent = make_intent("data_query", entities={"analysis_type": "trend"})
+        result = router.route(intent, make_safety())
         assert result.route == "tool_simple"
         assert result.modules is not None
         assert "activity_summary" in result.modules
@@ -185,7 +192,7 @@ class TestSafetyBlocking:
 
     def test_high_priority_blocks_any_intent(self, router: Router) -> None:
         safety = make_safety(safety_level="high_priority", is_safe=False)
-        for intent in ["data_retrieval", "plan_request", "general_chat", "health_concern"]:
+        for intent in ["data_query", "plan_request", "general_chat", "health_concern"]:
             result = router.route(make_intent(intent), safety)
             assert result.blocked is True, f"intent {intent!r} должен быть заблокирован"
 
@@ -196,7 +203,7 @@ class TestSafetyBlocking:
 
     def test_blocked_has_no_tool_calls(self, router: Router) -> None:
         safety = make_safety(safety_level="high_priority", is_safe=False)
-        result = router.route(make_intent("data_retrieval"), safety)
+        result = router.route(make_intent("data_query"), safety)
         assert result.tool_calls is None
         assert result.modules is None
         assert result.template_id is None

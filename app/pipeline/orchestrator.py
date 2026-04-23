@@ -261,26 +261,35 @@ class PipelineOrchestrator:
 
             # 6. fast_direct_answer
             if route_result.fast_path:
-                try:
+                if route_result.static_response is not None:
+                    # Детерминированный ответ — без LLM (capability_question и т.п.)
                     async with tracker.track_stage("response_gen"):
-                        generator_result = await self._response_generator.generate(
-                            enriched_query=enriched,
-                            route=route_result.route,
-                            structured_result=None,
-                            safety_level=safety_result.safety_level,
-                            intent=intent_result.intent,
-                            on_token=on_token,
+                        response_text = route_result.static_response
+                        if on_token is not None:
+                            for token in response_text:
+                                on_token(token)
+                    llm_calls_count = 0
+                else:
+                    try:
+                        async with tracker.track_stage("response_gen"):
+                            generator_result = await self._response_generator.generate(
+                                enriched_query=enriched,
+                                route=route_result.route,
+                                structured_result=None,
+                                safety_level=safety_result.safety_level,
+                                intent=intent_result.intent,
+                                on_token=on_token,
+                            )
+                        llm_calls_count = 1
+                        response_text = generator_result.content
+                        llm_model_used = generator_result.llm_response.model
+                    except Exception as exc:
+                        logger.error(
+                            "Orchestrator: ResponseGenerator (fast_path) error: %s", exc,
+                            exc_info=True,
                         )
-                    llm_calls_count = 1
-                    response_text = generator_result.content
-                    llm_model_used = generator_result.llm_response.model
-                except Exception as exc:
-                    logger.error(
-                        "Orchestrator: ResponseGenerator (fast_path) error: %s", exc,
-                        exc_info=True,
-                    )
-                    errors.append(f"ResponseGenerator: {exc}")
-                    response_text = _FALLBACK_RESPONSE
+                        errors.append(f"ResponseGenerator: {exc}")
+                        response_text = _FALLBACK_RESPONSE
 
                 await self._save_messages(session_id, user_id, raw_query, response_text, db)
                 llm_calls = llm_call_logger.stop(llm_token)

@@ -87,7 +87,7 @@ async def test_fast_path_greeting(mock_ollama, mock_chroma, test_db) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_tool_simple_data_retrieval(mock_ollama, mock_chroma, test_db) -> None:
+async def test_tool_simple_data_query(mock_ollama, mock_chroma, test_db) -> None:
     mock_ollama.set("response", "За прошлую неделю у тебя 7 пробежек по 45 минут.")
 
     result = await pipeline_orchestrator.process_query(
@@ -101,8 +101,8 @@ async def test_tool_simple_data_retrieval(mock_ollama, mock_chroma, test_db) -> 
     assert result.route == "tool_simple"
     assert result.fast_path is False
     assert result.blocked is False
-    assert result.intent == "data_retrieval"
-    # tool_simple для data_retrieval зовёт get_activities + get_daily_facts
+    assert result.intent == "data_query"
+    # tool_simple для data_query зовёт get_activities + get_daily_facts
     assert "get_activities" in result.tools_called
     assert "get_daily_facts" in result.tools_called
     assert result.llm_calls_count == 1

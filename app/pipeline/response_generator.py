@@ -34,7 +34,7 @@ _SAFETY_WARNING_SUFFIX = (
 )
 
 _PLANNER_ROLE_INTENTS = {"plan_request"}
-_RAG_INTENTS = {"plan_request", "health_concern", "data_analysis"}
+_RAG_INTENTS = {"plan_request", "health_concern", "data_query", "reference_question"}
 
 _BASE_SYSTEM_PROMPT_TEMPLATE = """Ты — дружелюбный фитнес-ассистент. Отвечай на русском.
 
