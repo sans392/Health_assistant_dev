@@ -10,6 +10,7 @@ from app.models.llm_call import LLMCall
 from app.models.tool_call import ToolCall
 from app.models.rag_chunk import RAGChunk
 from app.models.seed_run import SeedRun
+from app.models.pending_clarification import PendingClarification
 
 __all__ = [
     "UserProfile",
@@ -23,4 +24,5 @@ __all__ = [
     "ToolCall",
     "RAGChunk",
     "SeedRun",
+    "PendingClarification",
 ]

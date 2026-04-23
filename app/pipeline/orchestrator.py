@@ -27,6 +27,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chat import ChatMessage, ChatSession
+from app.pipeline.clarification import (
+    build_clarification_question,
+    needs_clarification,
+    resume_from_clarification,
+    save_pending,
+)
 from app.pipeline.context_builder import ContextBuilder
 from app.pipeline.intent_detection import IntentDetector
 from app.pipeline.memory_update import memory_updater
@@ -195,22 +201,84 @@ class PipelineOrchestrator:
         intent_result = None
 
         try:
+            # 0. Clarification resume — если есть pending с прошлого раунда
+            #    и новое сообщение покрывает хотя бы один из недостающих слотов,
+            #    продолжаем исходный запрос с полным набором entities.
+            resumed_intent = await resume_from_clarification(
+                db=db, session_id=session_id, new_message=raw_query,
+            )
+
             # 1. Context Builder
             async with tracker.track_stage("context_build"):
                 enriched = await self._context_builder.build(
-                    query=raw_query, session_id=session_id, user_id=user_id, db=db,
+                    query=resumed_intent.raw_query if resumed_intent else raw_query,
+                    session_id=session_id, user_id=user_id, db=db,
                 )
 
-            # 2. Intent Detection
-            history = (enriched.conversation_history or [])[-3:]
-            async with tracker.track_stage("intent_stage1"):
-                intent_result = await self._intent_detector.detect(
-                    raw_query, llm_registry=llm_registry, history=history,
+            # 2. Intent Detection (пропускаем, если это resume)
+            if resumed_intent is not None:
+                intent_result = resumed_intent
+                logger.info(
+                    "Orchestrator: clarification resume | session=%s intent=%s",
+                    session_id, intent_result.intent,
+                )
+            else:
+                history = (enriched.conversation_history or [])[-3:]
+                async with tracker.track_stage("intent_stage1"):
+                    intent_result = await self._intent_detector.detect(
+                        raw_query, llm_registry=llm_registry, history=history,
+                    )
+
+            # 2a. Clarification request — если intent требует обязательные слоты,
+            #     а их не хватает, задаём один вопрос и сохраняем pending.
+            missing = needs_clarification(intent_result.intent, intent_result.slots)
+            if missing and resumed_intent is None:
+                question = build_clarification_question(missing)
+                async with tracker.track_stage(
+                    "clarification_requested",
+                    metadata={"missing_slots": missing, "intent": intent_result.intent},
+                ):
+                    await save_pending(
+                        db=db,
+                        session_id=session_id,
+                        intent_result=intent_result,
+                        missing=missing,
+                    )
+                    if on_token is not None:
+                        for token in question:
+                            on_token(token)
+
+                await self._save_messages(session_id, user_id, raw_query, question, db)
+                llm_calls = llm_call_logger.stop(llm_token)
+                await llm_call_logger.flush_to_db(request_id, llm_calls, db)
+                tool_calls_log = tool_call_logger.stop(tool_token)
+                await tool_call_logger.flush_to_db(request_id, tool_calls_log, db)
+                duration = int(time.monotonic() * 1000 - start_ms)
+                return PipelineResult(
+                    response_text=question,
+                    intent=intent_result.intent,
+                    route="clarification",
+                    fast_path=False,
+                    blocked=False,
+                    tools_called=[],
+                    modules_used=[],
+                    duration_ms=duration,
+                    errors=errors,
+                    raw_query=raw_query,
+                    intent_confidence=intent_result.confidence,
+                    safety_level="ok",
+                    llm_model=ollama_client.model,
+                    llm_calls_count=0,
+                    request_id=request_id,
+                    stage_trace=tracker.trace,
+                    llm_role_usage={},
+                    entities=intent_result.entities,
+                    llm_calls_detail=_format_llm_calls(llm_calls),
                 )
 
             # 3. Safety Check
             async with tracker.track_stage("safety"):
-                safety_result = self._safety_checker.check(raw_query)
+                safety_result = self._safety_checker.check(intent_result.raw_query)
 
             # 4. Router
             async with tracker.track_stage("routing"):

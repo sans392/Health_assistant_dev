@@ -19,6 +19,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models.llm_call import LLMCall
+from app.models.pending_clarification import PendingClarification
 from app.pipeline.orchestrator import pipeline_orchestrator
 
 from tests.integration.conftest import drain_background_tasks
@@ -175,7 +176,9 @@ async def test_planner_loop(mock_ollama, mock_chroma, test_db) -> None:
     result = await pipeline_orchestrator.process_query(
         user_id="user-test",
         session_id="sess-planner",
-        raw_query="Составь индивидуальный план тренировок",
+        # time_range задан явно — иначе orchestrator сначала уточнит период
+        # (Issue #57: clarification loop для plan_request без time_range).
+        raw_query="Составь индивидуальный план тренировок на месяц",
         db=test_db,
     )
 
@@ -276,3 +279,82 @@ async def test_hrv_today_prompt_has_baseline_pct(mock_ollama, mock_chroma, test_
     )
     # Голый JSON-дамп не должен уходить в промпт
     assert '"iso_date"' not in combined
+
+
+# ---------------------------------------------------------------------------
+# 7. Clarification loop (Issue #57) — два user-turn сценарий
+# ---------------------------------------------------------------------------
+
+
+async def test_clarification_two_turn_plan_request(
+    mock_ollama, mock_chroma, test_db,
+) -> None:
+    """Первый ход: «составь план» без time_range → оркестратор задаёт
+    уточняющий вопрос и сохраняет pending. Второй ход: «на неделю для бега»
+    дозаполняет time_range и sport_type → нормальный flow генерации плана."""
+    session_id = "sess-clarif"
+
+    # --- Turn 1: pending должен сохраниться, вопрос задан ---
+    result1 = await pipeline_orchestrator.process_query(
+        user_id="user-test",
+        session_id=session_id,
+        raw_query="Составь план",
+        db=test_db,
+    )
+
+    assert result1.route == "clarification"
+    assert result1.intent == "plan_request"
+    assert result1.blocked is False
+    assert result1.llm_calls_count == 0
+    # Вопрос про период — priority slot time_range
+    assert "период" in result1.response_text.lower()
+    # Никакой LLM не дёргали — ни response, ни planner
+    assert mock_ollama.calls.get("response", 0) == 0
+    assert mock_ollama.calls.get("planner", 0) == 0
+
+    stages = [s["stage"] for s in result1.stage_trace]
+    assert "clarification_requested" in stages
+
+    # Pending зафиксирован в БД для этой сессии
+    await test_db.commit()
+    await test_db.rollback()  # сброс кеша identity map
+    res = await test_db.execute(
+        select(PendingClarification).where(
+            PendingClarification.session_id == session_id
+        )
+    )
+    pending = res.scalar_one_or_none()
+    assert pending is not None
+    assert pending.intent == "plan_request"
+    assert "time_range" in pending.missing_slots
+
+    # --- Turn 2: ответ пользователя дозаполняет слоты, план генерируется ---
+    mock_ollama.set("planner", "Недельный план для бега: Пн — лёгкий бег, Ср — интервалы, ...")
+
+    result2 = await pipeline_orchestrator.process_query(
+        user_id="user-test",
+        session_id=session_id,
+        raw_query="за неделю для бега",
+        db=test_db,
+    )
+
+    assert result2.route != "clarification"
+    assert result2.intent == "plan_request"
+    assert result2.blocked is False
+    assert result2.response_text.startswith("Недельный план")
+
+    # Resume → Context Builder, intent_stage1 пропускаем (уже есть pending)
+    stages2 = [s["stage"] for s in result2.stage_trace]
+    assert "intent_stage1" not in stages2
+    assert "routing" in stages2
+    assert "response_gen" in stages2
+
+    # Pending очищен
+    await test_db.commit()
+    await test_db.rollback()
+    res2 = await test_db.execute(
+        select(PendingClarification).where(
+            PendingClarification.session_id == session_id
+        )
+    )
+    assert res2.scalar_one_or_none() is None

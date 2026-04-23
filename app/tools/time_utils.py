@@ -121,9 +121,9 @@ def extract_time_range_label(text: str) -> str | None:
         return "сегодня"
     if re.search(r"\bвчера\b", lower):
         return "вчера"
-    if re.search(r"\bза неделю\b|\bна прошл\w+ неделе\b|\bза последн\w+ неделю\b", lower):
+    if re.search(r"\bза неделю\b|\bна неделю\b|\bна прошл\w+ неделе\b|\bза последн\w+ неделю\b", lower):
         return "за неделю"
-    if re.search(r"\bза месяц\b|\bна прошл\w+ месяц\b|\bза последн\w+ месяц\b", lower):
+    if re.search(r"\bза месяц\b|\bна месяц\b|\bна прошл\w+ месяц\b|\bза последн\w+ месяц\b", lower):
         return "за месяц"
 
     # Числовые формы: «3-4 дня», «за 10 дней», «за последние 14 дней»
