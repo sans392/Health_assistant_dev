@@ -47,7 +47,7 @@ class TemplateResult:
 # Реестр шаблонов — фиксированные последовательности шагов
 TEMPLATES: dict[str, list[dict[str, Any]]] = {
     "weekly_training_plan": [
-        {"tool": "get_user_profile", "args": {}},
+        # {"tool": "get_user_profile", "args": {}}, # In base system prompt ?
         {"tool": "get_activities", "args": {"days": 14}},
         {"tool": "compute_training_load", "args": {}},
         {"tool": "rag_retrieve", "args": {"category": "training_principles", "top_k": 3}},

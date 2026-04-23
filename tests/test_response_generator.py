@@ -160,15 +160,6 @@ class TestRagFormatting:
 class TestStripPresentedKeys:
     """Тесты фильтрации ключей, уже отрисованных в отдельных system-блоках."""
 
-    def test_strips_get_user_profile_always(self) -> None:
-        """get_user_profile всегда вырезается — профиль отдельным блоком."""
-        structured = {
-            "get_user_profile": {"name": "Иван", "age": 30},
-            "compute_recovery": {"score": 72},
-        }
-        cleaned = _strip_presented_keys(structured, strip_rag=False)
-        assert cleaned == {"compute_recovery": {"score": 72}}
-
     def test_strips_rag_keys_when_strip_rag_true(self) -> None:
         """rag_retrieve* вырезаются, когда их уже показали в RAG-блоке."""
         structured = {
@@ -193,7 +184,6 @@ class TestStripPresentedKeys:
         """Фильтрация работает внутри tool_data (структура tool_simple)."""
         structured = {
             "tool_data": {
-                "get_user_profile": {"name": "Иван"},
                 "rag_retrieve": [{"text": "x"}],
                 "get_activities": [{"id": 1}],
             },
@@ -205,7 +195,6 @@ class TestStripPresentedKeys:
         """Если tool_data опустел после фильтрации — сам ключ удаляем."""
         structured = {
             "tool_data": {
-                "get_user_profile": {"name": "Иван"},
                 "rag_retrieve": [{"text": "x"}],
             },
         }
@@ -238,39 +227,6 @@ class TestStripPresentedKeys:
         assert "compute_recovery" in system
         # Ключ RAG не должен попасть в блок «Результаты анализа»
         assert "rag_retrieve_recovery_science" not in system
-
-    def test_build_context_system_avoids_profile_duplication(self) -> None:
-        """get_user_profile в structured_result НЕ должен попадать в JSON."""
-        structured = {
-            "get_user_profile": {"name": "Иван", "age": 30},
-            "compute_recovery": {"score": 72},
-        }
-        system = _build_context_system(
-            structured_result=structured,
-            rag_chunks=[],
-            semantic_context=[],
-        )
-        assert system is not None
-        assert "## Результаты анализа" in system
-        assert "compute_recovery" in system
-        assert "get_user_profile" not in system
-        assert "Иван" not in system
-
-    def test_build_context_system_only_duplicates_returns_none(self) -> None:
-        """Если в structured_result только дубли — блок «Результаты анализа» не нужен."""
-        rag_chunks = [{"text": "x", "category": "c", "confidence": "h", "score": 0.9}]
-        structured = {
-            "get_user_profile": {"name": "Иван"},
-            "rag_retrieve_training_principles": rag_chunks,
-        }
-        system = _build_context_system(
-            structured_result=structured,
-            rag_chunks=rag_chunks,
-            semantic_context=[],
-        )
-        assert system is not None
-        assert "## Релевантные знания (RAG)" in system
-        assert "## Результаты анализа" not in system
 
 
 @pytest.mark.asyncio

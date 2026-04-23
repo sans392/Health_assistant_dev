@@ -190,8 +190,6 @@ def _strip_presented_keys(
 ) -> dict | None:
     """Убрать из structured_result ключи, уже показанные в отдельных system-блоках.
 
-    - get_user_profile — всегда (есть блок «## Информация о пользователе»,
-      построенный из EnrichedQuery.user_profile)
     - rag_retrieve* — только если RAG-блок действительно сформирован (strip_rag=True)
 
     Обрабатывает и вложенный tool_data (структура маршрута tool_simple).
@@ -202,8 +200,6 @@ def _strip_presented_keys(
         return structured_result
 
     def is_presented(key: str) -> bool:
-        if key == "get_user_profile":
-            return True
         if strip_rag and _is_rag_key(key):
             return True
         return False
