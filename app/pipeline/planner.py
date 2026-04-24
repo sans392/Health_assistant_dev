@@ -23,6 +23,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.pipeline.tool_result_compressor import compress_for_planner
 from app.services.llm_registry import llm_registry
 from app.services.tool_call_logger import tool_call_logger
 from app.tools.db_tools import get_activities, get_daily_facts, get_user_profile
@@ -34,7 +35,6 @@ logger = logging.getLogger(__name__)
 _MAX_ITERATIONS = 5
 _MAX_TOOL_CALLS_PER_ITER = 3
 _TIMEOUT_TOTAL = 360.0  # секунды
-_MAX_TOOL_RESULT_CHARS = 1500  # лимит сырых данных tool в истории итераций
 
 _TOOLS_DESCRIPTION = """\
 - get_activities: тренировки пользователя. args: {"days": int}
@@ -43,7 +43,18 @@ _TOOLS_DESCRIPTION = """\
 - compute_recovery: recovery score (последние 14 дней). args: {}
 - check_overtraining: признаки перетренированности. args: {}
 - rag_retrieve: знания из базы. args: {"category": str, "top_k": int}
-  Категории: physiology_norms | training_principles | recovery_science | sport_specific | nutrition_basics"""
+  Категории: physiology_norms | training_principles | recovery_science | sport_specific | nutrition_basics
+
+Формат результатов tools:
+- Длинные list-результаты (get_activities, get_daily_facts при >5 записей) приходят
+  сжатыми: {"tool_result": {"summary": {...}, "sample": [...], "total_count": N},
+  "compressed": true, "full_count": N, "shown": K}. Поле "summary" содержит агрегаты
+  и baseline-сравнение, "sample" — top-K самых значимых записей. Используй summary
+  для общих выводов; при необходимости деталей вызови tool повторно с более узким
+  фильтром (меньше days или конкретный sport_type).
+- dict-результаты (compute_recovery, check_overtraining, get_user_profile) приходят
+  без сжатия.
+- rag_retrieve: top-1 чанк целиком, остальные — title+snippet (поле "snippet")."""
 
 _SYSTEM_PROMPT_TEMPLATE = """\
 Ты — планировщик фитнес-ассистента. Для ответа пользователю вызывай tools.
@@ -243,10 +254,11 @@ class PlannerAgent:
                     )
                     result.raw_iter_results[f"{tool_name}_iter{iteration}"] = tool_data
                     result.total_tool_calls += 1
+                    compressed = compress_for_planner(tool_name, tool_data)
                     tool_results_payload.append({
                         "tool": tool_name,
                         "args": tool_args,
-                        "result": self._truncate_tool_data(tool_data),
+                        "result": compressed.to_message_payload(),
                     })
                     logger.info("PlannerAgent: tool '%s' выполнен | iter=%d", tool_name, iteration)
                     tool_call_logger.record(
@@ -331,25 +343,6 @@ class PlannerAgent:
             keys = list(data.keys())[:4]
             return "{" + ", ".join(str(k) for k in keys) + ", ...}"
         return str(data)[:100]
-
-    def _truncate_tool_data(
-        self, data: Any, max_chars: int = _MAX_TOOL_RESULT_CHARS
-    ) -> Any:
-        """Усечь результат tool перед отправкой обратно в chat-историю.
-
-        Без ограничения LLM получает раздутый контекст и зацикливается.
-        Для сериализуемых структур, чей JSON превышает max_chars, возвращаем
-        строку-маркер; иначе — исходный объект.
-        """
-        if data is None:
-            return None
-        try:
-            serialized = json.dumps(data, ensure_ascii=False, default=str)
-        except (TypeError, ValueError):
-            return str(data)[:max_chars]
-        if len(serialized) > max_chars:
-            return serialized[:max_chars] + "…(усечено)"
-        return data
 
     def _serialize_assistant_turn(self, parsed: dict) -> str:
         """Сериализовать разобранный JSON-ответ планера для истории чата."""

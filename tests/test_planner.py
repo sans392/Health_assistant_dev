@@ -312,6 +312,83 @@ class TestPlannerPlanMethod:
         # Есть assistant-ход планера в истории второй итерации
         assert any(m["role"] == "assistant" for m in messages_seen[1])
 
+    async def test_plan_compresses_long_tool_result_before_sending_to_llm(self) -> None:
+        """Issue #58: длинные list-результаты сжимаются перед подачей планировщику.
+
+        Убеждаемся, что во второй итерации:
+        - в истории НЕТ сырых 50 записей (raw blob превратился бы в raw text);
+        - присутствует поле `compressed: true` и `full_count: 50`;
+        - присутствует блок summary;
+        - присутствует sample ограниченного размера (5).
+        """
+        agent = PlannerAgent()
+        agent._max_iterations = 2
+        db = _make_db()
+
+        messages_seen: list[list[dict]] = []
+
+        async def mock_chat(messages, system_prompt=None, temperature=0.3, format=None):
+            messages_seen.append([dict(m) for m in messages])
+            if len(messages_seen) == 1:
+                return _make_llm_response(
+                    '{"thought":"нужны активности","tool_calls":'
+                    '[{"tool":"get_activities","args":{"days":60}}]}'
+                )
+            return _make_llm_response('{"thought":"ок","final_answer":true}')
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(side_effect=mock_chat)
+
+        async def mock_execute_tool(tool_name, args, user_id, query, sport_type, db):
+            # Возвращаем 50 активностей с уникальными id и различной интенсивностью.
+            return [
+                {
+                    "id": i,
+                    "user_id": "u1",
+                    "title": f"run-{i}",
+                    "sport_type": "running",
+                    "distance_meters": 5000 + i,
+                    "duration_seconds": 1800,
+                    "start_time": f"2026-03-{1 + (i % 28):02d}T10:00:00",
+                    "end_time": f"2026-03-{1 + (i % 28):02d}T10:30:00",
+                    "avg_speed": 3.0,
+                    "calories": 100 + i * 5,
+                    "avg_heart_rate": 140,
+                    "source": "seed",
+                }
+                for i in range(50)
+            ]
+
+        agent._execute_tool = mock_execute_tool
+
+        with patch("app.pipeline.planner.llm_registry") as mock_registry:
+            mock_registry.get_client.return_value = mock_client
+            result = await agent.plan(
+                query="разбери мою нагрузку за 2 месяца",
+                user_id="u1",
+                user_context="ctx",
+                entities={},
+                db=db,
+            )
+
+        # Планер всё ещё видит все 50 записей в merged tool_results (для response).
+        assert len(result.tool_results["get_activities"]) == 50
+
+        # А в истории сообщений LLM — сжатая версия.
+        assert len(messages_seen) >= 2
+        second_iter_user_turns = [
+            m["content"] for m in messages_seen[1] if m["role"] == "user"
+        ]
+        # Последнее user-сообщение — результаты tool.
+        tool_turn_text = second_iter_user_turns[-1]
+        assert '"compressed": true' in tool_turn_text
+        assert '"full_count": 50' in tool_turn_text
+        assert '"shown": 5' in tool_turn_text
+        assert '"summary"' in tool_turn_text
+        assert '"sample"' in tool_turn_text
+        # Финальный ответ планера (на второй итерации) успешно получен.
+        assert result.error is None
+
     async def test_plan_timeout_sets_flag(self) -> None:
         agent = PlannerAgent()
         agent._timeout = 0.0001  # Ультра-малый таймаут
