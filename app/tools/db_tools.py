@@ -71,6 +71,36 @@ def _daily_fact_to_dict(fact: DailyFact) -> dict:
     }
 
 
+# Маппинг логических метрик (значения MetricEnum + английские алиасы) на
+# реальные столбцы DailyFact. Нужен для фильтра в get_daily_facts: intent
+# detection/planner передают метрики в терминах MetricEnum («шаги», «калории»,
+# «сон», «recovery», ...), а DailyFact хранит их под техническими именами.
+# Метрики, которых нет в DailyFact (вес, рост, strain, rpe, дистанция, темп,
+# время, cadence), в словарь не попадают и при фильтре игнорируются.
+_METRIC_TO_DAILY_FACT_FIELDS: dict[str, tuple[str, ...]] = {
+    "шаги": ("steps",),
+    "steps": ("steps",),
+    "калории": ("calories_kcal",),
+    "calories": ("calories_kcal",),
+    "calories_kcal": ("calories_kcal",),
+    "heart_rate": ("resting_heart_rate",),
+    "resting_heart_rate": ("resting_heart_rate",),
+    "hrv": ("hrv_rmssd_milli",),
+    "hrv_rmssd_milli": ("hrv_rmssd_milli",),
+    "сон": ("sleep_total_in_bed_milli",),
+    "sleep": ("sleep_total_in_bed_milli",),
+    "sleep_total_in_bed_milli": ("sleep_total_in_bed_milli",),
+    "recovery": ("recovery_score",),
+    "recovery_score": ("recovery_score",),
+    "spo2": ("spo2_percentage",),
+    "spo2_percentage": ("spo2_percentage",),
+    "skin_temp": ("skin_temp_celsius",),
+    "skin_temp_celsius": ("skin_temp_celsius",),
+    "water": ("water_liters",),
+    "water_liters": ("water_liters",),
+}
+
+
 def _profile_to_dict(profile: UserProfile) -> dict:
     """Сериализует UserProfile в словарь."""
     return {
@@ -229,9 +259,14 @@ async def get_daily_facts(
         facts = result.scalars().all()
         data = [_daily_fact_to_dict(f) for f in facts]
 
-        # Если запрошены конкретные метрики — оставляем только нужные поля
+        # Если запрошены конкретные метрики — оставляем только нужные поля.
+        # Метрики приходят в терминах MetricEnum («шаги», «калории», «сон»,
+        # «recovery», ...) либо как имена столбцов; транслируем в имена полей
+        # DailyFact. Неизвестные метрики молча пропускаем.
         if metrics:
-            allowed = set(metrics) | {"id", "user_id", "iso_date"}
+            allowed: set[str] = {"id", "user_id", "iso_date"}
+            for metric in metrics:
+                allowed.update(_METRIC_TO_DAILY_FACT_FIELDS.get(metric, ()))
             data = [{k: v for k, v in row.items() if k in allowed} for row in data]
 
         logger.info(
