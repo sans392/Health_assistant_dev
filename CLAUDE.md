@@ -7,30 +7,11 @@
 **Health Assistant** — локальный ассистент для анализа здоровья, физических нагрузок и тренировок.
 Работает **оффлайн** (без интернета), LLM через локальный Ollama.
 
-**Текущий этап:** Phase 2 **завершён** (issues #21–#37 закрыты и смёржены в main).
-Следующий этап — v3. Если новых инструкций нет — работаем в режиме поддержки:
-багфиксы, небольшие доработки, подготовка заглушек из списка «TODO v3» к
-реализации.
+Режим работы по умолчанию — поддержка: багфиксы, небольшие доработки, подготовка
+заглушек из списка «TODO v3» к реализации. Если новых инструкций нет — не
+затевай крупных рефакторингов.
 
-Что реализовано в Phase 2:
-- Мульти-модельный **LLM Registry** (роли `intent_llm` / `safety_llm` / `response` / `planner`)
-- **ChromaDB + embeddings + RAG** (демо-набор, 5 категорий)
-- **Semantic Memory v1** (Q/A эмбеддинги, retrieval в Context Builder)
-- **Router v2** — 4 маршрута: `fast_direct_answer`, `tool_simple`, `template_plan`, `planner`
-- **Planner Agent** (LLM-loop с JSON tool-calls, до 5 итераций)
-- **Template Plan Executor** (weekly / overtraining / recovery / progress)
-- Расширенное **Data Processing** (recovery / strain / HR-zones / overtraining / training load / trends)
-- **Logging v2**: `llm_calls` + `stage_trace` + `llm_role_usage` + `rag_chunks_used`
-- **Stage Events + token streaming** по WebSocket
-- **Админ-панель v2**: Logs v2, LLM Config, KB browser, Semantic Memory, Diagnostics, Seed UI
-- **Integration tests** (Orchestrator v2) + unit-тесты критичных модулей
-
-**Ключевые документы:**
-- `README.md` — обзор проекта, быстрый старт, структура
-- `health_assistant_architecture_v2.yaml` — полная архитектура (референс, не менять без запроса)
-- `PHASE2_PLAN.md` — исторический план Phase 2 (issues #21–#37, граф зависимостей)
-
-MVP-план (issues #1–#14) закрыт и удалён из репозитория — историю смотри в git log.
+**Ключевой документ:** `README.md` — обзор проекта, быстрый старт, структура.
 
 ## Tech Stack
 
@@ -63,22 +44,22 @@ health_assistant/
 │   ├── schemas/                  # Pydantic
 │   ├── services/
 │   │   ├── llm_service.py        # Ollama HTTP-клиент
-│   │   ├── llm_registry.py       # per-role model routing (Phase 2)
-│   │   ├── embedding_service.py  # Phase 2
-│   │   ├── vector_store.py       # ChromaDB wrapper (Phase 2)
+│   │   ├── llm_registry.py       # per-role model routing
+│   │   ├── embedding_service.py
+│   │   ├── vector_store.py       # ChromaDB wrapper
 │   │   ├── logging_service.py
 │   │   ├── data_ingestion/       # ЗАГЛУШКА — пока источник данных только seed
 │   │   └── data_processing/
 │   ├── pipeline/
 │   │   ├── context_builder.py
-│   │   ├── intent_detection.py         # rule-based + LLM stage 2 (Phase 2)
+│   │   ├── intent_detection.py         # rule-based + LLM stage 2
 │   │   ├── safety_check.py             # pattern-based (v2 отложено)
-│   │   ├── router.py                   # 4 маршрута (Phase 2)
+│   │   ├── router.py                   # 4 маршрута
 │   │   ├── tool_executor.py
-│   │   ├── template_plan_executor.py   # Phase 2
-│   │   ├── planner.py                  # LLM tool-calls loop (Phase 2)
+│   │   ├── template_plan_executor.py
+│   │   ├── planner.py                  # LLM tool-calls loop
 │   │   ├── response_generator.py
-│   │   ├── memory_update.py            # Phase 2
+│   │   ├── memory_update.py
 │   │   └── orchestrator.py
 │   ├── tools/                    # Tool executor tools (+ rag_retrieve)
 │   ├── api/                      # Routes (chat WS, admin API)
@@ -86,7 +67,7 @@ health_assistant/
 │   └── static/                   # CSS/JS для chat и admin
 ├── scripts/
 │   ├── seed_data.py              # Seed Generator v2 (параметризуемый)
-│   └── seed_knowledge.py         # Knowledge Base демо-чанки (Phase 2)
+│   └── seed_knowledge.py         # Knowledge Base демо-чанки
 ├── data/                         # SQLite DB + ChromaDB persistent
 └── tests/
 ```
@@ -121,12 +102,49 @@ docker compose exec app python scripts/seed_knowledge.py
 ## Конвенции
 
 ### Код
-- **Язык комментариев и docstrings:** русский (проект локализован, LLM отвечает на русском)
 - **Язык идентификаторов:** английский
 - **Type hints:** обязательно везде
 - **Async:** весь I/O (DB, LLM, HTTP, ChromaDB где возможно) — async
 - **Pydantic:** для всех schemas на границах API
 - **Dataclasses или Pydantic:** для внутренних DTO (pipeline result, intent result, stage event)
+
+### Стиль комментариев и docstrings
+
+Применяется ко **всему новому коду** и к комментариям, которые ты добавляешь
+рядом с правками. Старые комментарии на русском не переписываем массово —
+только если рядом всё равно идёт правка.
+
+- **Язык:** простой английский. Короткие фразы, обычные слова, без формального
+  тона и без «корпоративных» оборотов.
+- **Пиши как человек, а не генератор:** комментарий имеет право на жизнь только
+  если в нём есть смысл, который не виден из кода.
+- **Что писать:** неочевидное «почему», скрытые инварианты, обходы конкретных
+  багов, тонкости поведения, которые удивят читателя.
+- **Что НЕ писать:**
+  - пересказ того, что и так видно из имён и сигнатуры (`# increment counter`,
+    `# returns user`)
+  - ссылки на текущую задачу / issue / автора (`# added for #42`, `# fix from PR`)
+  - TODO без конкретики
+  - многоабзацные docstrings там, где хватает одной строки
+- **Docstrings:** одна короткая строка по делу. Развёрнутый блок — только если
+  у функции реально нетривиальный контракт (edge cases, инварианты входа/выхода).
+- **Маркеры заглушек v3:** оставляем как есть (`TODO v3`, `# stub: ...`) —
+  по ним ищется работа.
+
+Хороший пример:
+```python
+# Ollama drops the connection on long prompts; chunk to stay under ~8k tokens.
+def chunk_prompt(text: str) -> list[str]:
+    ...
+```
+
+Плохой пример:
+```python
+# This function chunks the prompt into smaller pieces.
+# It takes a string and returns a list of strings.
+def chunk_prompt(text: str) -> list[str]:
+    ...
+```
 
 ### Именование
 - Модули pipeline: snake_case (`intent_detection.py`, `template_plan_executor.py`)
@@ -135,10 +153,9 @@ docker compose exec app python scripts/seed_knowledge.py
 
 ## Отложено на v3 (TODO v3)
 
-Следующие подсистемы из `health_assistant_architecture_v2.yaml` **намеренно не
-реализованы** в Phase 2 и имеют заглушки/комментарии в коде. При поступлении
-задачи из этого списка — смотри состояние текущей заглушки, не ломай существующую
-функциональность.
+Следующие подсистемы **намеренно не реализованы** и имеют заглушки/комментарии
+в коде. При поступлении задачи из этого списка — смотри состояние текущей
+заглушки, не ломай существующую функциональность.
 
 - **Data ingestion из реального API** (+ Anomaly detection, Deduplication).
   Источник данных — только Seed Generator v2.
@@ -150,26 +167,26 @@ docker compose exec app python scripts/seed_knowledge.py
 - **Proactive Alerts** (HRV drop, RHR spike, weekly summary) — не запускаются.
   Пустой модуль `app/services/alerts.py` с описанием (если отсутствует — создать при задаче v3).
 - **Testing & Evaluation** (eval-датасеты, hallucination tests, latency benchmarks,
-  RAG quality) — только unit-тесты критичных модулей + интеграционные для orchestrator.
+  RAG quality) — отдельно не ведём.
 
-Knowledge Base (RAG) — сейчас **минимальный демо-набор** (20–40 чанков по всем 5 категориям YAML).
+Knowledge Base (RAG) — сейчас **минимальный демо-набор** (20–40 чанков по 5 категориям).
 Расширять через `scripts/seed_knowledge.py` или админ-страницу `/admin/knowledge`.
 
 ## Работа с Ollama и моделями
 
 - Хост: `http://ollama:11434` (внутри сети `ollama-net`)
 - **Multi-model через LLM Registry**. Роли:
-  - `intent_llm` — классификация intent при low-confidence (дефолт: lightweight, YAML → `qwen2.5:7b`)
+  - `intent_llm` — классификация intent при low-confidence (дефолт: lightweight, `qwen2.5:7b`)
   - `safety_llm` — зарезервировано под v2, сейчас не вызывается
-  - `response` — основной генератор ответов (дефолт: primary, YAML → `qwen2.5:14b`)
-  - `planner` — сложное планирование + генерация планов (дефолт: heavy, YAML → `qwen2.5:32b`)
+  - `response` — основной генератор ответов (дефолт: primary, `qwen2.5:14b`)
+  - `planner` — сложное планирование + генерация планов (дефолт: heavy, `qwen2.5:32b`)
 - Конфиг ролей — из `.env` + runtime overrides в SQLite (`llm_role_config`, меняется в админке).
 - Если указанная модель недоступна в Ollama — fallback на `OLLAMA_MODEL` (базовая) с WARN в логах.
 - Всегда логировать каждый LLM-вызов в `llm_calls`: role, model, длину промпта, длину ответа,
   duration_ms, request_id.
 - Timeout: 60s (heavy — 120s), 1 retry при timeout.
 
-## Pipeline flow (Phase 2 reference)
+## Pipeline flow
 
 ```
 User Query
@@ -188,33 +205,25 @@ User Query
   Response Delivery (stage events + token streaming)
 ```
 
-## Issues и фазы
-
-- **MVP** (#1–#14) — закрыт, файлы плана удалены из репозитория.
-- **Phase 2** (#21–#37) — закрыт и смёржен в `main`. Детали и граф зависимостей —
-  в `PHASE2_PLAN.md` (оставлен как исторический документ).
-- **v3** — ещё не спланирован. Формируется из блоков «TODO v3» выше.
-
 ## Тесты
 
-- Unit-тесты для критичных модулей: intent detection, safety, routing, data processing,
-  planner (mock Ollama), template executor, rag retrieval (mock Chroma).
-- Интеграционные тесты — в #37 (Orchestrator v2): fast_path, tool_simple, template_plan,
-  planner loop, safety block.
-- Фреймворк: `pytest` + `pytest-asyncio`
-- Запуск: `docker compose exec app pytest`
+- Новые тесты добавляем **только под текущую задачу**: то, что нужно, чтобы
+  убедиться в корректности своих правок и не сломать соседнее поведение.
+  Не пишем тесты «впрок» и не расширяем покрытие без запроса.
+- Если правка ломает существующий тест — чиним по делу: либо тест устарел и
+  обновляется под новый контракт, либо это регрессия и чинить надо код.
+- Фреймворк: `pytest` + `pytest-asyncio`.
+- Запуск: `docker compose exec app pytest` (или конкретный файл/узел).
 
 ## Что делать при получении задачи
 
 1. Прочитать issue / запрос полностью (acceptance criteria!).
-2. Если задача относится к v3-блоку из раздела «Отложено на v3» — сначала
-   посмотреть, что есть сейчас в коде (заглушка / комментарий / пустой модуль),
-   и не сломать существующий контракт.
-3. Если задача — багфикс или доработка Phase 2, проверить, что не противоречит
-   архитектурному референсу (`health_assistant_architecture_v2.yaml`).
-4. Реализовать **минимально достаточно**, не добавлять лишнего.
-5. Проверить:
+2. Если задача относится к разделу «Отложено на v3» — сначала посмотреть, что
+   уже есть в коде (заглушка / комментарий / пустой модуль), и не сломать
+   существующий контракт.
+3. Реализовать **минимально достаточно**, не добавлять лишнего.
+4. Проверить:
    - `docker compose up --build` запускается без ошибок
    - `alembic upgrade head` проходит
-   - Релевантные тесты проходят (`pytest`, включая `tests/integration`)
+   - Релевантные тесты проходят (`pytest`)
    - Чат `/chat` и админка `/admin` открываются
