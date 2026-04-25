@@ -315,3 +315,138 @@ class TestFormatStructuredBlock:
         ]
         text = format_structured_block(data, baseline_facts=baseline)
         assert "% от базы" in text
+
+
+# ---------------------------------------------------------------------------
+# Adaptive detail level — daily facts
+# ---------------------------------------------------------------------------
+
+
+class TestDailyFactsDetailLevel:
+    def test_short_window_includes_per_day_breakdown(self) -> None:
+        """Окно ≤ 7 дней — после агрегатов идёт построчная разбивка по датам."""
+        data = {
+            "get_daily_facts": [
+                {"iso_date": f"2026-04-{20+i:02d}", "steps": 8000 + i * 100}
+                for i in range(4)
+            ]
+        }
+        text = format_structured_block(data)
+        assert "По дням:" in text
+        # Все даты присутствуют
+        for i in range(4):
+            assert f"2026-04-{20+i:02d}" in text
+        # И значения тоже
+        assert "8 000" in text
+        assert "8 300" in text
+
+    def test_seven_days_still_includes_breakdown(self) -> None:
+        """Граница включительно: 7 дней попадают в детальный режим."""
+        data = {
+            "get_daily_facts": [
+                {"iso_date": f"2026-04-{15+i:02d}", "steps": 7000 + i * 100}
+                for i in range(7)
+            ]
+        }
+        text = format_structured_block(data)
+        assert "По дням:" in text
+
+    def test_long_window_skips_per_day_breakdown(self) -> None:
+        """Окно > 7 дней — только агрегаты, без построчной разбивки."""
+        data = {
+            "get_daily_facts": [
+                {"iso_date": f"2026-04-{1+i:02d}", "steps": 7000 + i * 50}
+                for i in range(10)
+            ]
+        }
+        text = format_structured_block(data)
+        assert "По дням:" not in text
+        # Но агрегаты остаются
+        assert "Шаги" in text
+
+    def test_breakdown_lists_only_present_metrics_per_row(self) -> None:
+        """В разбивке метрика выводится только если у дня она не None."""
+        data = {
+            "get_daily_facts": [
+                {"iso_date": "2026-04-22", "steps": 9000, "hrv_rmssd_milli": None},
+                {"iso_date": "2026-04-23", "steps": 9500, "hrv_rmssd_milli": 55},
+            ]
+        }
+        text = format_structured_block(data)
+        # Берём только строки из блока «По дням» — у них префикс "  · YYYY-".
+        breakdown_lines = [
+            ln for ln in text.splitlines() if ln.startswith("  · 2026-")
+        ]
+        first_line = next((ln for ln in breakdown_lines if "2026-04-22" in ln), "")
+        assert "Шаги" in first_line
+        assert "HRV" not in first_line
+        second_line = next((ln for ln in breakdown_lines if "2026-04-23" in ln), "")
+        assert "Шаги" in second_line
+        assert "HRV" in second_line
+
+
+# ---------------------------------------------------------------------------
+# Adaptive detail level — activities
+# ---------------------------------------------------------------------------
+
+
+class TestActivitiesDetailLevel:
+    def test_short_window_lists_each_activity(self) -> None:
+        """≤ 5 тренировок — выводится «По тренировкам» с каждой сессией."""
+        data = {
+            "get_activities": [
+                {
+                    "sport_type": "running", "title": "Утренний бег",
+                    "duration_seconds": 1800, "calories": 250,
+                    "distance_meters": 4000,
+                    "start_time": "2026-04-22T07:00:00",
+                    "avg_heart_rate": 145,
+                },
+                {
+                    "sport_type": "cycling", "title": "Вело",
+                    "duration_seconds": 3600, "calories": 500,
+                    "distance_meters": 20000,
+                    "start_time": "2026-04-23T18:00:00",
+                    "avg_heart_rate": 130,
+                },
+            ]
+        }
+        text = format_structured_block(data)
+        assert "По тренировкам:" in text
+        assert "Утренний бег" in text
+        assert "Вело" in text
+        assert "2026-04-22" in text
+        assert "2026-04-23" in text
+        # Атрибуты по конкретной сессии
+        assert "ЧСС 145" in text
+        assert "20.0 км" in text or "20 км" in text
+
+    def test_long_window_skips_per_session_listing(self) -> None:
+        """> 5 тренировок — только сводка, без построчного перечисления."""
+        activities = [
+            {
+                "sport_type": "running", "title": f"Бег {i}",
+                "duration_seconds": 1800, "calories": 250,
+                "distance_meters": 4000,
+                "start_time": f"2026-04-{10+i:02d}T07:00:00",
+            }
+            for i in range(6)
+        ]
+        text = format_structured_block({"get_activities": activities})
+        assert "По тренировкам:" not in text
+        # Но агрегаты на месте
+        assert "Тренировок: 6" in text
+
+    def test_five_activities_still_lists_each(self) -> None:
+        """Граница включительно: 5 активностей попадают в детальный режим."""
+        activities = [
+            {
+                "sport_type": "running", "title": f"Бег {i}",
+                "duration_seconds": 1800, "calories": 250,
+                "distance_meters": 4000,
+                "start_time": f"2026-04-{10+i:02d}T07:00:00",
+            }
+            for i in range(5)
+        ]
+        text = format_structured_block({"get_activities": activities})
+        assert "По тренировкам:" in text

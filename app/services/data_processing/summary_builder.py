@@ -60,6 +60,14 @@ _FALLBACK_JSON_LIMIT = 500
 
 _ANOMALY_SIGMA = 2.0
 
+# Up to this many daily points we add a per-day breakdown after aggregates.
+# Above the threshold the prompt only sees aggregates — keeps token cost bounded
+# and prevents the LLM from offering details it cannot back with data.
+_DAILY_BREAKDOWN_THRESHOLD = 7
+
+# Same idea for activities: short workout lists are fully enumerated.
+_ACTIVITIES_LISTING_THRESHOLD = 5
+
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -415,6 +423,32 @@ def format_metric_summary(summary: MetricSummary) -> str:
     return "\n".join(parts)
 
 
+def _format_activities_listing(activities: list[dict]) -> str:
+    """Render every activity as one line — used for short workout windows."""
+    rows: list[str] = []
+    for act in sorted(activities, key=lambda a: a.get("start_time") or ""):
+        start = (act.get("start_time") or "")[:10]
+        title = act.get("title") or act.get("sport_type") or "тренировка"
+        duration_min = int(act.get("duration_seconds") or 0) // 60
+        cal = int(act.get("calories") or 0)
+        distance_m = float(act.get("distance_meters") or 0.0)
+        hr = act.get("avg_heart_rate")
+
+        bits: list[str] = [f"{duration_min} мин"]
+        if cal:
+            bits.append(f"{cal} ккал")
+        if distance_m > 0:
+            bits.append(f"{round(distance_m / 1000, 2)} км")
+        if hr:
+            bits.append(f"ЧСС {hr}")
+
+        head = f"  · {start}: {title}" if start else f"  · {title}"
+        rows.append(f"{head} — " + ", ".join(bits))
+    if not rows:
+        return ""
+    return "По тренировкам:\n" + "\n".join(rows)
+
+
 def format_activity_summary(summary: ActivityPromptSummary) -> str:
     """Отрендерить ActivityPromptSummary в блок текста."""
     if summary.total_activities == 0:
@@ -472,6 +506,35 @@ def _looks_like_activities(value: Any) -> bool:
     )
 
 
+def _format_daily_breakdown(facts: list[dict], metrics: list[str]) -> str:
+    """Render facts as a per-day list (one row per date) for short windows."""
+    rows: list[str] = []
+    for fact in sorted(facts, key=lambda f: f.get("iso_date") or ""):
+        iso_date = fact.get("iso_date")
+        if not iso_date:
+            continue
+        parts: list[str] = []
+        for metric in metrics:
+            value = fact.get(metric)
+            if value is None:
+                continue
+            try:
+                num = float(value)
+            except (TypeError, ValueError):
+                continue
+            label, unit, precision = _DEFAULT_METRIC_LABELS.get(
+                metric, (metric, "", 2)
+            )
+            num_str = _format_number(num, precision)
+            unit_str = f" {unit}" if unit else ""
+            parts.append(f"{label} {num_str}{unit_str}")
+        if parts:
+            rows.append(f"  · {iso_date}: " + "; ".join(parts))
+    if not rows:
+        return ""
+    return "По дням:\n" + "\n".join(rows)
+
+
 def _format_daily_facts_block(
     facts: list[dict],
     baseline_facts: list[dict] | None,
@@ -494,6 +557,12 @@ def _format_daily_facts_block(
         if summary.count == 0:
             continue
         lines.append(format_metric_summary(summary))
+
+    if 0 < len(facts) <= _DAILY_BREAKDOWN_THRESHOLD:
+        breakdown = _format_daily_breakdown(facts, chosen)
+        if breakdown:
+            lines.append(breakdown)
+
     return "\n".join(lines) if lines else "- Метрик нет."
 
 
@@ -524,7 +593,12 @@ def _format_value(
 
     if key in _ACTIVITIES_KEYS or _looks_like_activities(value):
         summary = build_activity_summary(value)
-        return format_activity_summary(summary)
+        rendered = format_activity_summary(summary)
+        if 0 < len(value) <= _ACTIVITIES_LISTING_THRESHOLD:
+            listing = _format_activities_listing(value)
+            if listing:
+                rendered = f"{rendered}\n{listing}"
+        return rendered
 
     # Вложенные dict (например tool_data / processed) — рекурсивно.
     if isinstance(value, dict):
