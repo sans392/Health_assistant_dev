@@ -11,7 +11,6 @@
 заглушек из списка «TODO v3» к реализации. Если новых инструкций нет — не
 затевай крупных рефакторингов.
 
-**Ключевой документ:** `README.md` — обзор проекта, быстрый старт, структура.
 
 ## Tech Stack
 
@@ -21,7 +20,7 @@
 | Database | SQLite + SQLAlchemy + Alembic |
 | LLM | Ollama — multi-model через LLM Registry (роли: intent_llm / safety_llm / response / planner) |
 | Vector DB | ChromaDB (embedded, persistent volume) |
-| Embeddings | `nomic-embed-text` через Ollama `/api/embeddings` |
+| Embeddings | `nomic-embed-text-v2-moe` через Ollama `/api/embeddings` |
 | Chat UI | HTML + vanilla JS + WebSocket (stage events + token streaming) |
 | Admin UI | Jinja2 + HTMX + Pico CSS |
 | Container | Docker Compose |
@@ -176,10 +175,10 @@ Knowledge Base (RAG) — сейчас **минимальный демо-набо
 
 - Хост: `http://ollama:11434` (внутри сети `ollama-net`)
 - **Multi-model через LLM Registry**. Роли:
-  - `intent_llm` — классификация intent при low-confidence (дефолт: lightweight, `qwen2.5:7b`)
+  - `intent_llm` — классификация intent при low-confidence (дефолт: lightweight, `qwen3.5:9b`)
   - `safety_llm` — зарезервировано под v2, сейчас не вызывается
-  - `response` — основной генератор ответов (дефолт: primary, `qwen2.5:14b`)
-  - `planner` — сложное планирование + генерация планов (дефолт: heavy, `qwen2.5:32b`)
+  - `response` — основной генератор ответов (дефолт: primary, `qwen3.5:9b`)
+  - `planner` — сложное планирование + генерация планов (дефолт: heavy, `qwen3.5:9b`)
 - Конфиг ролей — из `.env` + runtime overrides в SQLite (`llm_role_config`, меняется в админке).
 - Если указанная модель недоступна в Ollama — fallback на `OLLAMA_MODEL` (базовая) с WARN в логах.
 - Всегда логировать каждый LLM-вызов в `llm_calls`: role, model, длину промпта, длину ответа,
