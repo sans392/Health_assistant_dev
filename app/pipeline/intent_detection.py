@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from app.pipeline.slot_state import SlotState, slot_state_from_entities
-from app.tools.time_utils import current_datetime_str
+from app.tools.time_utils import current_datetime_str, extract_time_range_label
 
 if TYPE_CHECKING:
     from app.services.llm_registry import LLMRegistry
@@ -106,26 +106,10 @@ _ANALYSIS_TYPE_PATTERNS: list[tuple[str, str]] = [
     (r"где\s+(я\s+)?(проседа|провал|слаб)|в\s+чём\s+проблем", "breakdown"),
 ]
 
-# Паттерны для извлечения сущностей time_range
-_TIME_RANGE_PATTERNS: list[tuple[str, str | None]] = [
-    (r"\bсегодня\b", "сегодня"),
-    (r"\bвчера\b", "вчера"),
-    (r"\bза неделю\b|\bна неделю\b|\bна прошл\w+ неделе\b|\bза последн\w+ неделю\b", "за неделю"),
-    (r"\bза месяц\b|\bна месяц\b|\bна прошл\w+ месяц\b|\bза последн\w+ месяц\b", "за месяц"),
-    (r"\bв январ\w+\b", "январь"),
-    (r"\bв феврал\w+\b", "февраль"),
-    (r"\bв март\w+\b", "март"),
-    (r"\bв апрел\w+\b", "апрель"),
-    (r"\bв ма[йе]\w*\b", "май"),
-    (r"\bв июн\w+\b", "июнь"),
-    (r"\bв июл\w+\b", "июль"),
-    (r"\bв август\w*\b", "август"),
-    (r"\bв сентябр\w+\b", "сентябрь"),
-    (r"\bв октябр\w+\b", "октябрь"),
-    (r"\bв ноябр\w+\b", "ноябрь"),
-    (r"\bв декабр\w+\b", "декабрь"),
-    (r"\bза последн\w+ (\d+) дн\w+\b", None),  # динамически
-]
+# time_range извлекается единой функцией extract_time_range_label из time_utils —
+# держим парсинг дат в одном месте, чтобы конкретные даты («16 числа»,
+# «16 апреля») и относительные («за неделю», «за последние 14 дней») жили
+# по одинаковым правилам.
 
 # Паттерны для извлечения сущностей sport_type
 _SPORT_PATTERNS: list[tuple[str, str]] = [
@@ -187,16 +171,10 @@ def _extract_entities(text: str) -> dict:
     entities: dict = {}
     lower = text.lower()
 
-    # time_range
-    for pattern, label in _TIME_RANGE_PATTERNS:
-        if label is None:
-            m = re.search(pattern, lower)
-            if m:
-                entities["time_range"] = f"за последние {m.group(1)} дней"
-                break
-        elif re.search(pattern, lower):
-            entities["time_range"] = label
-            break
+    # time_range — единый парсер из time_utils (включая конкретные даты).
+    label = extract_time_range_label(text)
+    if label:
+        entities["time_range"] = label
 
     # sport_type
     for pattern, sport in _SPORT_PATTERNS:

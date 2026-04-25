@@ -20,6 +20,33 @@ _MONTHS_GEN_RU = [
     "июля", "августа", "сентября", "октября", "ноября", "декабря",
 ]
 
+# Корни месяцев в родительном падеже для распознавания «16 апреля» и т.п.
+# Перечисляем именно корни, чтобы покрывать любые окончания (-я / -е / -й).
+_MONTH_STEMS_RU: list[tuple[str, int]] = [
+    ("январ", 1), ("феврал", 2), ("март", 3), ("апрел", 4),
+    ("ма[йяе]", 5), ("июн", 6), ("июл", 7), ("август", 8),
+    ("сентябр", 9), ("октябр", 10), ("ноябр", 11), ("декабр", 12),
+]
+
+# Optional ordinal suffix: «-го», «-ого», «-его», «-ое» (с дефисом и без).
+# Длинные альтернативы — раньше коротких, чтобы regex не съел только «го»
+# когда дальше идёт «ого».
+_DAY_ORDINAL_SUFFIX = r"(?:-?(?:ого|его|го|ое))?"
+
+_MONTHS_ALT = "|".join(f"{stem}\\w*" for stem, _ in _MONTH_STEMS_RU)
+
+# «16 апреля», «16-го апреля», «16ого апреля»
+_DAY_MONTH_RE = re.compile(
+    rf"\b(\d{{1,2}}){_DAY_ORDINAL_SUFFIX}\s+({_MONTHS_ALT})\b"
+)
+
+# «16 числа», «16-го числа», «16ого числа», «16го числа».
+_DAY_OF_MONTH_RE = re.compile(
+    rf"\b(\d{{1,2}}){_DAY_ORDINAL_SUFFIX}\s+числа\b"
+)
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 
 def current_datetime_str(now: datetime | None = None) -> str:
     """Текущая дата и время сервера в читаемом русском формате.
@@ -37,12 +64,44 @@ def current_datetime_str(now: datetime | None = None) -> str:
     )
 
 
+def _resolve_day_in_current_month(day: int, today: date) -> date | None:
+    """Number 1..31 → конкретная дата.
+
+    Если такой день уже наступил в этом месяце — берём этот месяц,
+    иначе предыдущий. Это покрывает естественную интерпретацию вопроса
+    «что было 16-го?» — пользователь имеет в виду ближайшее прошлое.
+    """
+    if not 1 <= day <= 31:
+        return None
+    year, month = today.year, today.month
+    candidate = _safe_date(year, month, day)
+    if candidate is not None and candidate <= today:
+        return candidate
+    # День в этом месяце ещё не наступил (или 31 в коротком месяце) —
+    # уходим в предыдущий месяц.
+    if month == 1:
+        year, month = year - 1, 12
+    else:
+        month -= 1
+    return _safe_date(year, month, day)
+
+
+def _safe_date(year: int, month: int, day: int) -> date | None:
+    """date(...) с проверкой допустимости (например, 31 февраля → None)."""
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
 def resolve_time_range(time_range_entity: str | None) -> tuple[date, date]:
     """Преобразует строку time_range entity в конкретные даты.
 
     Args:
         time_range_entity: Строка вида «сегодня», «вчера», «за неделю», «за месяц»,
-                           «за последние N дней» или название месяца.
+                           «за последние N дней», название месяца, или ISO-дата
+                           «YYYY-MM-DD» (одиночный день — для конкретных запросов
+                           вида «16-го числа»).
 
     Returns:
         Кортеж (date_from, date_to). По умолчанию — последние 7 дней.
@@ -66,6 +125,16 @@ def resolve_time_range(time_range_entity: str | None) -> tuple[date, date]:
 
     if entity in ("за месяц", "за последний месяц"):
         return today - timedelta(days=29), today
+
+    # ISO-дата «YYYY-MM-DD» — одиночный день. Используется как label для
+    # запросов вида «16-го числа», где extract_time_range_label уже
+    # резолвит фразу в конкретную дату.
+    if _ISO_DATE_RE.match(entity):
+        try:
+            d = date.fromisoformat(entity)
+            return d, d
+        except ValueError:
+            pass
 
     # «за последние N дней»
     m = re.search(r"за последни\w*\s+(\d+)\s+дн\w+", entity)
@@ -106,21 +175,32 @@ _NUMERIC_DAYS_PATTERNS: list[tuple[str, int]] = [
 ]
 
 
-def extract_time_range_label(text: str) -> str | None:
+def extract_time_range_label(text: str, today: date | None = None) -> str | None:
     """Извлечь «сырую» фразу time_range из произвольного текста.
 
-    Возвращает нормализованный label (совместимый с resolve_time_range):
+    Возвращает нормализованный label, совместимый с resolve_time_range:
     «сегодня» / «вчера» / «за неделю» / «за месяц» / «за последние N дней» /
-    название месяца, либо None если ничего не найдено.
+    название месяца / ISO-дата «YYYY-MM-DD» (одиночный день для запросов
+    «16-го числа», «16 апреля»). None — если ничего не найдено.
 
     Нормализация поглощает формы вроде «3-4 дня» → «за последние 3 дня».
     """
     lower = text.lower()
+    today = today or date.today()
 
     if re.search(r"\bсегодня\b", lower):
         return "сегодня"
     if re.search(r"\bвчера\b", lower):
         return "вчера"
+
+    # Конкретный день месяца — приоритетнее общих фраз «за неделю», иначе
+    # «за прошлую неделю 16 апреля» съест день. На практике точная дата
+    # перевешивает, потому что запрос с конкретным числом — это запрос
+    # точечных данных.
+    iso = _try_match_specific_date(lower, today)
+    if iso is not None:
+        return iso
+
     if re.search(r"\bза неделю\b|\bна неделю\b|\bна прошл\w+ неделе\b|\bза последн\w+ неделю\b", lower):
         return "за неделю"
     if re.search(r"\bза месяц\b|\bна месяц\b|\bна прошл\w+ месяц\b|\bза последн\w+ месяц\b", lower):
@@ -156,6 +236,55 @@ def extract_time_range_label(text: str) -> str | None:
         if re.search(pattern, lower):
             return name
 
+    return None
+
+
+# Корни месяцев (родительный падеж) → номер месяца.
+_MONTH_STEM_TO_NUM: dict[str, int] = {}
+for _stem, _num in _MONTH_STEMS_RU:
+    if _stem == "ма[йяе]":
+        for _v in ("май", "мая", "мае"):
+            _MONTH_STEM_TO_NUM[_v] = 5
+    else:
+        _MONTH_STEM_TO_NUM[_stem] = _num
+
+
+def _try_match_specific_date(lower: str, today: date) -> str | None:
+    """«16 апреля», «16-го числа» → ISO-строка YYYY-MM-DD; иначе None."""
+    # Сначала «N <месяц>» — он несёт больше информации (явный месяц).
+    m = _DAY_MONTH_RE.search(lower)
+    if m:
+        day = int(m.group(1))
+        month_word = m.group(2)
+        month = _month_num_from_word(month_word)
+        if month is not None:
+            year = today.year
+            candidate = _safe_date(year, month, day)
+            if candidate is None:
+                return None
+            # Если месяц ещё не наступил в этом году — берём прошлый год.
+            if candidate > today:
+                candidate = _safe_date(year - 1, month, day)
+                if candidate is None:
+                    return None
+            return candidate.isoformat()
+
+    # «N числа» — без явного месяца, текущий месяц.
+    m = _DAY_OF_MONTH_RE.search(lower)
+    if m:
+        day = int(m.group(1))
+        resolved = _resolve_day_in_current_month(day, today)
+        if resolved is not None:
+            return resolved.isoformat()
+
+    return None
+
+
+def _month_num_from_word(word: str) -> int | None:
+    """«апреля» / «мая» / «январе» → номер месяца 1..12."""
+    for stem, num in _MONTH_STEM_TO_NUM.items():
+        if word.startswith(stem):
+            return num
     return None
 
 

@@ -227,12 +227,21 @@ class ToolExecutor:
         """Собрать dict аргументов из SlotState для конкретного tool'а."""
         tr = slots.time_range
         # Дефолт: если time_range не указан, используем последние 7 дней.
+        # Логируем явно — иначе случай «intent не распарсил дату» молча
+        # маскируется и пользователь получает не тот период.
         if tr is not None:
             date_from, date_to = tr.date_from, tr.date_to
         else:
             today = date.today()
             date_from = today - timedelta(days=6)
             date_to = today
+            if tool_name in {"get_activities", "get_daily_facts", "get_activities_by_sport"}:
+                logger.warning(
+                    "ToolExecutor: time_range не определён для %s, "
+                    "используем дефолт last-7-days (%s..%s) | query=%r",
+                    tool_name, date_from, date_to,
+                    (query_text or "")[:120],
+                )
 
         sport = slots.sport_type.value if slots.sport_type else None
 

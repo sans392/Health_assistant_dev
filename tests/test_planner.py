@@ -1,11 +1,12 @@
 """Тесты для PlannerAgent (Issue #29)."""
 
 import asyncio
+from datetime import date, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.pipeline.planner import PlannerAgent, PlannerResult
+from app.pipeline.planner import PlannerAgent, PlannerResult, _TOOLS_DESCRIPTION
 
 
 def _make_db() -> AsyncMock:
@@ -57,6 +58,71 @@ class TestPlannerJsonParsing:
         agent = PlannerAgent()
         parsed = agent._parse_response("это не json вообще")
         assert parsed is None
+
+
+class TestPlannerToolsDescription:
+    """system-prompt планировщика должен описывать инструменты по схеме."""
+
+    def test_describes_get_activities_with_date_range(self) -> None:
+        # У старой версии было `args: {"days": int}` — оставлять нельзя,
+        # иначе LLM просит несуществующий параметр.
+        assert "get_activities(" in _TOOLS_DESCRIPTION
+        assert "date_from: YYYY-MM-DD" in _TOOLS_DESCRIPTION
+        assert "date_to: YYYY-MM-DD" in _TOOLS_DESCRIPTION
+
+    def test_describes_get_daily_facts_with_date_range(self) -> None:
+        assert "get_daily_facts(" in _TOOLS_DESCRIPTION
+        # Хотя бы один из аргументов date_* должен попасть в описание facts.
+        # Грубая проверка — описание не пустое и упоминает оба tool'а с YYYY-MM-DD.
+        idx = _TOOLS_DESCRIPTION.find("get_daily_facts(")
+        snippet = _TOOLS_DESCRIPTION[idx:idx + 200]
+        assert "YYYY-MM-DD" in snippet
+
+
+class TestPlannerResolveDateWindow:
+    """Парсер аргументов даты в _execute_tool: новые ISO + legacy days."""
+
+    def test_explicit_date_from_to(self) -> None:
+        df, dt = PlannerAgent._resolve_date_window(
+            {"date_from": "2026-04-16", "date_to": "2026-04-16"},
+            today=date(2026, 4, 25),
+        )
+        assert df == date(2026, 4, 16)
+        assert dt == date(2026, 4, 16)
+
+    def test_explicit_range(self) -> None:
+        df, dt = PlannerAgent._resolve_date_window(
+            {"date_from": "2026-04-10", "date_to": "2026-04-20"},
+            today=date(2026, 4, 25),
+        )
+        assert df == date(2026, 4, 10)
+        assert dt == date(2026, 4, 20)
+
+    def test_only_date_from_collapses_to_single_day(self) -> None:
+        df, dt = PlannerAgent._resolve_date_window(
+            {"date_from": "2026-04-16"},
+            today=date(2026, 4, 25),
+        )
+        assert df == dt == date(2026, 4, 16)
+
+    def test_legacy_days_fallback(self) -> None:
+        today = date(2026, 4, 25)
+        df, dt = PlannerAgent._resolve_date_window({"days": 14}, today=today)
+        assert dt == today
+        assert df == today - timedelta(days=13)
+
+    def test_no_args_defaults_to_7_days(self) -> None:
+        today = date(2026, 4, 25)
+        df, dt = PlannerAgent._resolve_date_window({}, today=today)
+        assert dt == today
+        assert df == today - timedelta(days=6)
+
+    def test_inverted_dates_swapped(self) -> None:
+        df, dt = PlannerAgent._resolve_date_window(
+            {"date_from": "2026-04-20", "date_to": "2026-04-10"},
+            today=date(2026, 4, 25),
+        )
+        assert df < dt
 
 
 class TestPlannerSummarize:

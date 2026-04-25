@@ -12,9 +12,10 @@
 
 from __future__ import annotations
 
+import types
 from datetime import date, timedelta
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -262,3 +263,85 @@ def validate_tool_args(tool_name: str, raw_args: dict[str, Any]) -> BaseModel:
     """
     model_cls = TOOL_ARGS_REGISTRY[tool_name]
     return model_cls.model_validate(raw_args)
+
+
+# ---------------------------------------------------------------------------
+# Compact tool signature for LLM prompts
+# ---------------------------------------------------------------------------
+
+# Поля, которые planner НЕ передаёт сам — заполняются ToolExecutor / pipeline.
+# Скрываем их из сигнатуры, чтобы не сбивать LLM.
+_PROMPT_HIDDEN_FIELDS: frozenset[str] = frozenset({"user_id", "tool"})
+
+
+def _render_field_type(annotation: Any) -> str:
+    """Компактное отображение типа поля для prompt-сигнатуры."""
+    origin = get_origin(annotation)
+
+    # Optional / Union → отдаём первое не-None значение и помечаем поле как опциональное.
+    if origin in (Union, types.UnionType):
+        non_none = [a for a in get_args(annotation) if a is not type(None)]
+        if len(non_none) == 1:
+            return _render_field_type(non_none[0])
+        return "|".join(_render_field_type(a) for a in non_none)
+
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        return "|".join(member.value for member in annotation)
+
+    if annotation is date:
+        return "YYYY-MM-DD"
+    if annotation is int:
+        return "int"
+    if annotation is float:
+        return "float"
+    if annotation is str:
+        return "str"
+    if annotation is bool:
+        return "bool"
+
+    if origin in (list, tuple):
+        inner_args = get_args(annotation)
+        inner = _render_field_type(inner_args[0]) if inner_args else "any"
+        return f"list[{inner}]"
+
+    if origin is Literal:
+        return "|".join(repr(v) for v in get_args(annotation))
+
+    return getattr(annotation, "__name__", str(annotation))
+
+
+def _is_optional_field(field: Any) -> bool:
+    """Поле считается опциональным, если у него есть default или Union с None."""
+    annotation = field.annotation
+    origin = get_origin(annotation)
+    if origin in (Union, types.UnionType) and type(None) in get_args(annotation):
+        return True
+    # Pydantic v2: PydanticUndefined означает «default не задан».
+    from pydantic_core import PydanticUndefined
+    if field.default is not PydanticUndefined:
+        return True
+    if getattr(field, "default_factory", None) is not None:
+        return True
+    return False
+
+
+def tool_to_prompt_signature(tool_name: str) -> str:
+    """Компактная сигнатура tool'а для system-prompt планировщика.
+
+    Генерируется из Pydantic-схемы, чтобы описание не разъезжалось с реальным
+    контрактом. Скрытые поля (`user_id`, `tool`) не показываем — их заполняет
+    pipeline, а не LLM.
+
+    Пример:
+        get_activities(date_from: YYYY-MM-DD, date_to: YYYY-MM-DD,
+                       sport_type?: running|cycling|...)
+    """
+    model_cls = TOOL_ARGS_REGISTRY[tool_name]
+    parts: list[str] = []
+    for name, field in model_cls.model_fields.items():
+        if name in _PROMPT_HIDDEN_FIELDS:
+            continue
+        rendered = _render_field_type(field.annotation)
+        suffix = "?" if _is_optional_field(field) else ""
+        parts.append(f"{name}{suffix}: {rendered}")
+    return f"{tool_name}({', '.join(parts)})"

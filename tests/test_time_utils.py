@@ -174,3 +174,68 @@ class TestBuildTimeRange:
         tr = build_time_range("за последние 14 дней")
         assert tr is not None
         assert tr.days == 14
+
+
+class TestSpecificDateExtraction:
+    """Парсинг конкретных дат («16 числа», «16 апреля») в ISO-label."""
+
+    def test_day_of_month_with_ordinal_dash(self) -> None:
+        today = date(2026, 4, 25)
+        assert extract_time_range_label("Мои шаги 16-го числа", today=today) == "2026-04-16"
+
+    def test_day_of_month_no_dash(self) -> None:
+        today = date(2026, 4, 25)
+        assert extract_time_range_label("Мои тренировки 16го числа", today=today) == "2026-04-16"
+
+    def test_day_of_month_full_ordinal(self) -> None:
+        today = date(2026, 4, 25)
+        assert extract_time_range_label("Шаги 16ого числа", today=today) == "2026-04-16"
+
+    def test_day_of_month_no_ordinal(self) -> None:
+        today = date(2026, 4, 25)
+        assert extract_time_range_label("Шаги 16 числа", today=today) == "2026-04-16"
+
+    def test_future_day_in_month_falls_back_to_prev_month(self) -> None:
+        """«25-го числа» при сегодня 2026-04-10 → 2026-03-25 (ближайшее прошлое)."""
+        today = date(2026, 4, 10)
+        assert extract_time_range_label("шаги 25 числа", today=today) == "2026-03-25"
+
+    def test_day_with_month_name(self) -> None:
+        today = date(2026, 4, 25)
+        assert extract_time_range_label("Шаги 16 апреля", today=today) == "2026-04-16"
+
+    def test_day_with_month_name_dash_ordinal(self) -> None:
+        today = date(2026, 4, 25)
+        assert extract_time_range_label("Шаги 16-го апреля", today=today) == "2026-04-16"
+
+    def test_day_with_future_month_uses_prev_year(self) -> None:
+        """«16 мая» при сегодня 2026-04-25 → 2025-05-16 (май ещё не наступил)."""
+        today = date(2026, 4, 25)
+        assert extract_time_range_label("Шаги 16 мая", today=today) == "2025-05-16"
+
+    def test_invalid_day_returns_no_match(self) -> None:
+        """31 февраля невалидно — функция не должна падать, возвращает None."""
+        today = date(2026, 4, 25)
+        assert extract_time_range_label("31 февраля", today=today) is None
+
+    def test_specific_date_overrides_relative_phrase(self) -> None:
+        """«16 числа за неделю» — конкретная дата приоритетнее общего интервала."""
+        today = date(2026, 4, 25)
+        label = extract_time_range_label("Активность 16 числа за неделю", today=today)
+        assert label == "2026-04-16"
+
+
+class TestResolveIsoLabel:
+    """resolve_time_range понимает ISO-метку YYYY-MM-DD как одиночный день."""
+
+    def test_iso_label_returns_single_day(self) -> None:
+        date_from, date_to = resolve_time_range("2026-04-16")
+        assert date_from == date(2026, 4, 16)
+        assert date_to == date(2026, 4, 16)
+
+    def test_build_time_range_from_iso_label(self) -> None:
+        tr = build_time_range("2026-04-16")
+        assert tr is not None
+        assert tr.days == 1
+        assert tr.date_from == date(2026, 4, 16)
+        assert tr.label == "2026-04-16"
