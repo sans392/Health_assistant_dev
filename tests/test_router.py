@@ -175,6 +175,38 @@ class TestPlanner:
         assert result.route == "planner"
         assert result.template_id is None
 
+    def test_data_query_breakdown_goes_to_planner(self, router: Router) -> None:
+        """Multi-day BREAKDOWN — planner."""
+        intent = make_intent(
+            "data_query",
+            entities={"analysis_type": "breakdown", "time_range": "за неделю"},
+        )
+        result = router.route(intent, make_safety())
+        assert result.route == "planner"
+
+    def test_data_query_single_day_breakdown_stays_simple(self, router: Router) -> None:
+        """Точечный день («16 числа») при analysis_type=breakdown — НЕ planner.
+
+        За один день нечего ломать в breakdown'е, planner добавляет только
+        латентность и часто промахивается с датой.
+        """
+        intent = make_intent(
+            "data_query",
+            entities={"analysis_type": "breakdown", "time_range": "2026-04-16"},
+        )
+        result = router.route(intent, make_safety())
+        assert result.route == "tool_simple"
+        assert result.tool_calls is not None
+        assert "get_activities" in result.tool_calls
+
+    def test_data_query_single_day_compare_stays_simple(self, router: Router) -> None:
+        intent = make_intent(
+            "data_query",
+            entities={"analysis_type": "compare", "time_range": "2026-04-16"},
+        )
+        result = router.route(intent, make_safety())
+        assert result.route == "tool_simple"
+
 
 class TestSafetyBlocking:
     """Тесты блокировки по safety."""

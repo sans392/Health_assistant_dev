@@ -19,6 +19,7 @@ from app.tools.schemas import (
     SportTypeEnum,
     TimeRange,
     UpdateProfileArgs,
+    tool_to_prompt_signature,
     validate_tool_args,
 )
 
@@ -225,3 +226,51 @@ class TestValidateToolArgs:
                 "get_activities",
                 {"user_id": "u1", "date_from": "2026-04-07", "date_to": "2026-04-01"},
             )
+
+
+class TestToolPromptSignature:
+    """Сигнатуры из Pydantic-схем для system-prompt планера.
+
+    Сигнатура должна совпадать с реальным контрактом ToolExecutor'а — иначе
+    планер просит несуществующие поля (`days` вместо `date_from`/`date_to`).
+    """
+
+    def test_get_activities_uses_date_from_to(self) -> None:
+        sig = tool_to_prompt_signature("get_activities")
+        assert sig.startswith("get_activities(")
+        assert "date_from: YYYY-MM-DD" in sig
+        assert "date_to: YYYY-MM-DD" in sig
+        # sport_type — опциональное поле
+        assert "sport_type?" in sig
+        # user_id и tool скрыты — заполняются pipeline'ом, не LLM
+        assert "user_id" not in sig
+        assert "tool:" not in sig
+        # Старого хардкода `days: int` для get_activities быть не должно
+        assert "days:" not in sig
+
+    def test_get_daily_facts_signature(self) -> None:
+        sig = tool_to_prompt_signature("get_daily_facts")
+        assert "date_from: YYYY-MM-DD" in sig
+        assert "date_to: YYYY-MM-DD" in sig
+        assert "metrics?" in sig
+
+    def test_compute_recovery_window_days_marked_optional(self) -> None:
+        sig = tool_to_prompt_signature("compute_recovery")
+        # У window_days есть default — должно быть optional
+        assert "window_days?: int" in sig
+
+    def test_sport_type_enum_values_listed(self) -> None:
+        sig = tool_to_prompt_signature("get_activities")
+        # Хотя бы пара значений enum'а должна быть в сигнатуре —
+        # без них LLM не знает, что туда подставлять.
+        assert "running" in sig
+        assert "cycling" in sig
+
+    def test_rag_retrieve_signature(self) -> None:
+        sig = tool_to_prompt_signature("rag_retrieve")
+        assert "query_text: str" in sig
+        assert "top_k?" in sig
+
+    def test_signature_for_unknown_tool_raises(self) -> None:
+        with pytest.raises(KeyError):
+            tool_to_prompt_signature("nonexistent_tool")

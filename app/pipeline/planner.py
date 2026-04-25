@@ -28,6 +28,7 @@ from app.services.llm_registry import llm_registry
 from app.services.tool_call_logger import tool_call_logger
 from app.tools.db_tools import get_activities, get_daily_facts, get_user_profile
 from app.tools.rag_retrieve import rag_retrieve
+from app.tools.schemas import tool_to_prompt_signature
 from app.tools.time_utils import current_datetime_str
 
 logger = logging.getLogger(__name__)
@@ -36,25 +37,69 @@ _MAX_ITERATIONS = 5
 _MAX_TOOL_CALLS_PER_ITER = 3
 _TIMEOUT_TOTAL = 360.0  # секунды
 
-_TOOLS_DESCRIPTION = """\
-- get_activities: тренировки пользователя. args: {"days": int}
-- get_daily_facts: дневные метрики здоровья (HRV, ЧСС, сон, шаги). args: {"days": int}
-- get_user_profile: профиль пользователя. args: {}
-- compute_recovery: recovery score (последние 14 дней). args: {}
-- check_overtraining: признаки перетренированности. args: {}
-- rag_retrieve: знания из базы. args: {"category": str, "top_k": int}
-  Категории: physiology_norms | training_principles | recovery_science | sport_specific | nutrition_basics
 
-Формат результатов tools:
-- Длинные list-результаты (get_activities, get_daily_facts при >5 записей) приходят
-  сжатыми: {"tool_result": {"summary": {...}, "sample": [...], "total_count": N},
-  "compressed": true, "full_count": N, "shown": K}. Поле "summary" содержит агрегаты
-  и baseline-сравнение, "sample" — top-K самых значимых записей. Используй summary
-  для общих выводов; при необходимости деталей вызови tool повторно с более узким
-  фильтром (меньше days или конкретный sport_type).
-- dict-результаты (compute_recovery, check_overtraining, get_user_profile) приходят
-  без сжатия.
-- rag_retrieve: top-1 чанк целиком, остальные — title+snippet (поле "snippet")."""
+def _parse_iso_date(value: Any) -> date | None:
+    """Безопасный парсер ISO-даты YYYY-MM-DD из произвольного значения."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        return None
+
+# Описания tools — компактные, человеческие. Сигнатуры подставляются автоматически
+# из Pydantic-схем (см. tool_to_prompt_signature), чтобы они не разъезжались с
+# реальным контрактом ToolExecutor'а.
+_TOOL_DESCRIPTIONS: list[tuple[str, str]] = [
+    ("get_activities", "тренировки пользователя за интервал дат"),
+    ("get_daily_facts", "дневные метрики здоровья (HRV, ЧСС, сон, шаги) за интервал дат"),
+    ("get_user_profile", "профиль пользователя"),
+    ("compute_recovery", "recovery score за окно window_days"),
+    ("check_overtraining", "признаки перетренированности за окно window_days"),
+    (
+        "rag_retrieve",
+        "знания из базы. Категории: physiology_norms | training_principles | "
+        "recovery_science | sport_specific | nutrition_basics",
+    ),
+]
+
+
+def _build_tools_description() -> str:
+    lines = []
+    for name, desc in _TOOL_DESCRIPTIONS:
+        lines.append(f"- {tool_to_prompt_signature(name)}: {desc}")
+    lines.append("")
+    lines.append(
+        "Аргументы date_from / date_to передавай в формате YYYY-MM-DD. "
+        "Опциональные поля (помечены `?`) можно опускать."
+    )
+    lines.append(
+        "Примеры: точечный день — date_from=date_to=YYYY-MM-DD; "
+        "интервал — задавай оба конца явно."
+    )
+    lines.append("")
+    lines.append(
+        "Формат результатов tools:\n"
+        "- Длинные list-результаты (get_activities, get_daily_facts при >5 записей) "
+        "приходят сжатыми: {\"tool_result\": {\"summary\": {...}, \"sample\": [...], "
+        "\"total_count\": N}, \"compressed\": true, \"full_count\": N, \"shown\": K}. "
+        "Поле \"summary\" содержит агрегаты и baseline-сравнение, \"sample\" — top-K "
+        "самых значимых записей. Используй summary для общих выводов; при "
+        "необходимости деталей вызови tool повторно с более узким интервалом "
+        "(date_from / date_to ближе к интересующему дню) или конкретным sport_type.\n"
+        "- dict-результаты (compute_recovery, check_overtraining, get_user_profile) "
+        "приходят без сжатия.\n"
+        "- rag_retrieve: top-1 чанк целиком, остальные — title+snippet "
+        "(поле \"snippet\")."
+    )
+    return "\n".join(lines)
+
+
+_TOOLS_DESCRIPTION = _build_tools_description()
 
 _SYSTEM_PROMPT_TEMPLATE = """\
 Ты — планировщик фитнес-ассистента. Для ответа пользователю вызывай tools.
@@ -409,6 +454,41 @@ class PlannerAgent:
                 merged[tool] = data
         return merged
 
+    @staticmethod
+    def _resolve_date_window(args: dict, today: date) -> tuple[date, date]:
+        """Вытащить date_from / date_to из args планировщика.
+
+        Поддерживает три формы (по убыванию приоритета):
+        — `date_from` + `date_to` (новая, основная, ISO YYYY-MM-DD);
+        — только `date_from` (одиночный день);
+        — `days: N` (legacy fallback — окно последних N дней до today).
+        Если ничего не передано — последние 7 дней.
+        """
+        raw_from = args.get("date_from")
+        raw_to = args.get("date_to")
+
+        df = _parse_iso_date(raw_from)
+        dt = _parse_iso_date(raw_to)
+
+        if df is not None and dt is not None:
+            if df > dt:
+                df, dt = dt, df
+            return df, dt
+        if df is not None:
+            return df, df
+        if dt is not None:
+            return dt, dt
+
+        days_raw = args.get("days")
+        if days_raw is not None:
+            try:
+                days = max(1, int(days_raw))
+            except (TypeError, ValueError):
+                days = 7
+        else:
+            days = 7
+        return today - timedelta(days=days - 1), today
+
     async def _execute_tool(
         self,
         tool_name: str,
@@ -422,19 +502,18 @@ class PlannerAgent:
         import dataclasses
 
         today = date.today()
-        days = int(args.get("days", 7))
-        date_from = today - timedelta(days=days - 1)
+        date_from, date_to = self._resolve_date_window(args, today)
 
         if tool_name == "get_user_profile":
             res = await get_user_profile(db=db, user_id=user_id)
             return res.data
 
         if tool_name == "get_activities":
-            res = await get_activities(db=db, user_id=user_id, date_from=date_from, date_to=today)
+            res = await get_activities(db=db, user_id=user_id, date_from=date_from, date_to=date_to)
             return res.data
 
         if tool_name == "get_daily_facts":
-            res = await get_daily_facts(db=db, user_id=user_id, date_from=date_from, date_to=today)
+            res = await get_daily_facts(db=db, user_id=user_id, date_from=date_from, date_to=date_to)
             return res.data
 
         if tool_name == "compute_recovery":

@@ -181,10 +181,14 @@ class Router:
 
         NONE / NORM_CHECK / TREND → tool_simple (retrieval ± лёгкие модули).
         BREAKDOWN / COMPARE       → planner (сложный многошаговый анализ).
+        Точечный день («16 числа») всегда tool_simple — за один день нечего
+        ломать в breakdown'е, а planner добавляет только латентность.
         """
         analysis_type = intent.slots.analysis_type
+        time_range = intent.slots.time_range
+        single_day = time_range is not None and time_range.days == 1
 
-        if analysis_type in (AnalysisType.BREAKDOWN, AnalysisType.COMPARE):
+        if not single_day and analysis_type in (AnalysisType.BREAKDOWN, AnalysisType.COMPARE):
             return RouteResult(
                 route="planner",
                 fast_path=False,
@@ -199,6 +203,10 @@ class Router:
         if analysis_type in (AnalysisType.NORM_CHECK, AnalysisType.TREND):
             modules = ["activity_summary", "trend_analyzer"]
 
+        reason = f"data_query_{analysis_type.value}"
+        if single_day and analysis_type in (AnalysisType.BREAKDOWN, AnalysisType.COMPARE):
+            reason = f"data_query_{analysis_type.value}_single_day"
+
         return RouteResult(
             route="tool_simple",
             fast_path=False,
@@ -206,7 +214,7 @@ class Router:
             block_message=None,
             tool_calls=["get_activities", "get_daily_facts"],
             modules=modules,
-            reason=f"data_query_{analysis_type.value}",
+            reason=reason,
         )
 
     def _route_plan_request(self, query: str) -> RouteResult:

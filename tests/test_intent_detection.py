@@ -196,6 +196,30 @@ class TestEntityExtraction:
         result = await detector.detect("Привет!")
         assert result.entities == {}
 
+    @pytest.mark.asyncio
+    async def test_specific_day_of_month_resolved_to_iso(self, detector: IntentDetector) -> None:
+        """«16ого числа» должен извлекаться в конкретную ISO-дату текущего месяца.
+
+        Сейчас год/месяц берутся из системной даты, поэтому проверяем только
+        формат и день, чтобы тест не ломался при смене месяца.
+        """
+        from datetime import date
+        today = date.today()
+        # Берём день в прошлом относительно today, чтобы алгоритм не уходил в
+        # предыдущий месяц.
+        target_day = max(1, today.day - 1)
+        query = f"Мои шаги {target_day}ого числа"
+        result = await detector.detect(query)
+        tr_label = result.entities.get("time_range")
+        assert tr_label is not None
+        # ISO-формат YYYY-MM-DD
+        assert len(tr_label) == 10 and tr_label[4] == "-" and tr_label[7] == "-"
+        assert int(tr_label[-2:]) == target_day
+        # SlotState должен распознать это как одиночный день
+        assert result.slots.time_range is not None
+        assert result.slots.time_range.days == 1
+        assert result.slots.time_range.date_from.day == target_day
+
 
 # ---------------------------------------------------------------------------
 # LLM stage 2 — fallback поведение

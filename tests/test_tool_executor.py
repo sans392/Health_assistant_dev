@@ -153,3 +153,54 @@ class TestToolExecutorExecute:
         today = date.today()
         assert captured_args["date_to"] == today
         assert captured_args["date_from"] == today - timedelta(days=6)
+
+    async def test_iso_label_resolved_to_single_day(self) -> None:
+        """ISO-label «YYYY-MM-DD» → date_from = date_to = тот же день."""
+        executor = ToolExecutor()
+        db = MagicMock()
+        mock_result = _make_tool_result("get_activities", data=[])
+        captured: dict = {}
+
+        async def capture_get_activities(db, user_id, date_from, date_to, sport_type=None):
+            captured["date_from"] = date_from
+            captured["date_to"] = date_to
+            return mock_result
+
+        with patch("app.pipeline.tool_executor.get_activities", new=capture_get_activities):
+            await executor.execute(
+                tool_calls=["get_activities"],
+                user_id="user-1",
+                entities={"time_range": "2026-04-16"},
+                db=db,
+            )
+
+        assert captured["date_from"] == date(2026, 4, 16)
+        assert captured["date_to"] == date(2026, 4, 16)
+
+    async def test_missing_time_range_logs_warning(self, caplog) -> None:
+        """Дефолт last-7-days применяется тихо — но логируется warning,
+        чтобы случай «intent не распарсил дату» был виден."""
+        import logging
+
+        executor = ToolExecutor()
+        db = MagicMock()
+        mock_result = _make_tool_result("get_activities", data=[])
+
+        with caplog.at_level(logging.WARNING, logger="app.pipeline.tool_executor"):
+            with patch(
+                "app.pipeline.tool_executor.get_activities",
+                new=AsyncMock(return_value=mock_result),
+            ):
+                await executor.execute(
+                    tool_calls=["get_activities"],
+                    user_id="user-1",
+                    entities={},
+                    db=db,
+                    query_text="мои тренировки 16ого числа",
+                )
+
+        warnings = [
+            r.message for r in caplog.records
+            if "time_range не определён" in r.message
+        ]
+        assert warnings, f"ожидали warning про time_range, получили: {caplog.records}"
