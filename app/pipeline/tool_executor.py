@@ -56,6 +56,69 @@ _MIN_WINDOW_DAYS = 3
 _MAX_WINDOW_DAYS = 60
 
 
+# Whitelisted-поля args-моделей, которые передаются в db_tools «как есть»
+# (числовые/строковые фильтры). sport_type/sport_types/metrics обрабатываются
+# отдельно — у них enum-значения нужно развернуть в str.
+_ACTIVITY_FILTER_FIELDS: tuple[str, ...] = (
+    "min_distance_meters", "max_distance_meters",
+    "min_duration_seconds", "max_duration_seconds",
+    "min_calories", "max_calories",
+    "min_avg_heart_rate", "max_avg_heart_rate",
+    "min_avg_speed", "max_avg_speed",
+    "min_elevation_meters", "max_elevation_meters",
+    "title_contains",
+)
+
+_DAILY_FACT_FILTER_FIELDS: tuple[str, ...] = (
+    "min_steps", "max_steps",
+    "min_calories_kcal", "max_calories_kcal",
+    "min_recovery_score", "max_recovery_score",
+    "min_hrv_rmssd_milli", "max_hrv_rmssd_milli",
+    "min_resting_heart_rate", "max_resting_heart_rate",
+    "min_sleep_total_in_bed_milli", "max_sleep_total_in_bed_milli",
+    "min_water_liters", "max_water_liters",
+    "min_spo2_percentage", "max_spo2_percentage",
+)
+
+
+def _activities_kwargs(args: "GetActivitiesArgs") -> dict[str, Any]:
+    """Развернуть GetActivitiesArgs в kwargs для get_activities.
+
+    Передаёт только non-None фильтры — иначе тесты с узкой mock-сигнатурой
+    падают на лишних kwargs.
+    """
+    kwargs: dict[str, Any] = {
+        "user_id": args.user_id,
+        "date_from": args.date_from,
+        "date_to": args.date_to,
+    }
+    if args.sport_type is not None:
+        kwargs["sport_type"] = args.sport_type.value
+    if args.sport_types:
+        kwargs["sport_types"] = [s.value for s in args.sport_types]
+    for f in _ACTIVITY_FILTER_FIELDS:
+        v = getattr(args, f, None)
+        if v is not None:
+            kwargs[f] = v
+    return kwargs
+
+
+def _daily_facts_kwargs(args: "GetDailyFactsArgs") -> dict[str, Any]:
+    """Развернуть GetDailyFactsArgs в kwargs для get_daily_facts."""
+    kwargs: dict[str, Any] = {
+        "user_id": args.user_id,
+        "date_from": args.date_from,
+        "date_to": args.date_to,
+    }
+    if args.metrics:
+        kwargs["metrics"] = [m.value for m in args.metrics]
+    for f in _DAILY_FACT_FILTER_FIELDS:
+        v = getattr(args, f, None)
+        if v is not None:
+            kwargs[f] = v
+    return kwargs
+
+
 @dataclass
 class ToolExecutorResult:
     """Агрегированный результат работы ToolExecutor."""
@@ -320,13 +383,8 @@ class ToolExecutor:
     ) -> ToolResult:
         """Вызвать конкретный tool по имени с валидированными args."""
         if isinstance(args, GetActivitiesArgs):
-            return await get_activities(
-                db=db,
-                user_id=args.user_id,
-                date_from=args.date_from,
-                date_to=args.date_to,
-                sport_type=args.sport_type.value if args.sport_type else None,
-            )
+            kwargs = _activities_kwargs(args)
+            return await get_activities(db=db, **kwargs)
 
         if isinstance(args, GetActivitiesBySportArgs):
             return await get_activities_by_sport(
@@ -338,13 +396,8 @@ class ToolExecutor:
             )
 
         if isinstance(args, GetDailyFactsArgs):
-            return await get_daily_facts(
-                db=db,
-                user_id=args.user_id,
-                date_from=args.date_from,
-                date_to=args.date_to,
-                metrics=[m.value for m in args.metrics] if args.metrics else None,
-            )
+            kwargs = _daily_facts_kwargs(args)
+            return await get_daily_facts(db=db, **kwargs)
 
         if isinstance(args, GetUserProfileArgs):
             return await get_user_profile(db=db, user_id=args.user_id)

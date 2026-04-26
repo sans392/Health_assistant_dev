@@ -17,6 +17,23 @@ from app.models.activity import Activity
 from app.models.daily_fact import DailyFact
 from app.models.user_profile import UserProfile
 
+
+def _apply_range_filters(stmt, model, ranges: dict[str, tuple[Any, Any]]):
+    """Прокинуть min/max-фильтры на column'ы модели в SQLAlchemy stmt.
+
+    ranges: column_name -> (min_value | None, max_value | None).
+    None-границы пропускаются, чтобы не плодить тривиальные WHERE 1=1.
+    """
+    for column_name, (lo, hi) in ranges.items():
+        if lo is None and hi is None:
+            continue
+        column = getattr(model, column_name)
+        if lo is not None:
+            stmt = stmt.where(column >= lo)
+        if hi is not None:
+            stmt = stmt.where(column <= hi)
+    return stmt
+
 logger = logging.getLogger(__name__)
 
 
@@ -131,17 +148,41 @@ async def get_activities(
     date_from: date,
     date_to: date,
     sport_type: str | None = None,
+    sport_types: list[str] | None = None,
+    min_distance_meters: float | None = None,
+    max_distance_meters: float | None = None,
+    min_duration_seconds: int | None = None,
+    max_duration_seconds: int | None = None,
+    min_calories: int | None = None,
+    max_calories: int | None = None,
+    min_avg_heart_rate: int | None = None,
+    max_avg_heart_rate: int | None = None,
+    min_avg_speed: float | None = None,
+    max_avg_speed: float | None = None,
+    min_elevation_meters: float | None = None,
+    max_elevation_meters: float | None = None,
+    title_contains: str | None = None,
 ) -> ToolResult:
-    """Получить тренировки пользователя за период.
+    """Получить тренировки пользователя за период с whitelisted-фильтрами.
 
-    Возвращает только первичные записи (is_primary=True).
+    Возвращает только первичные записи (is_primary=True). Все min/max-фильтры
+    опциональны и применяются только если значение не None — None-границы не
+    добавляют WHERE.
 
     Args:
         db: Асинхронная сессия SQLAlchemy.
         user_id: Идентификатор пользователя.
         date_from: Начало периода (включительно).
         date_to: Конец периода (включительно).
-        sport_type: Фильтр по виду спорта (опционально).
+        sport_type: Фильтр по виду спорта (одно значение).
+        sport_types: Несколько видов спорта одновременно (логическое OR).
+        min_distance_meters / max_distance_meters: диапазон дистанции.
+        min_duration_seconds / max_duration_seconds: диапазон длительности.
+        min_calories / max_calories: диапазон калорий.
+        min_avg_heart_rate / max_avg_heart_rate: диапазон средней ЧСС.
+        min_avg_speed / max_avg_speed: диапазон средней скорости (м/с).
+        min_elevation_meters / max_elevation_meters: диапазон набора высоты.
+        title_contains: подстрока в title (case-insensitive).
 
     Returns:
         ToolResult с list[dict] активностей.
@@ -162,14 +203,41 @@ async def get_activities(
         )
         if sport_type:
             stmt = stmt.where(Activity.sport_type == sport_type)
+        if sport_types:
+            stmt = stmt.where(Activity.sport_type.in_(list(sport_types)))
+
+        stmt = _apply_range_filters(stmt, Activity, {
+            "distance_meters": (min_distance_meters, max_distance_meters),
+            "duration_seconds": (min_duration_seconds, max_duration_seconds),
+            "calories": (min_calories, max_calories),
+            "avg_heart_rate": (min_avg_heart_rate, max_avg_heart_rate),
+            "avg_speed": (min_avg_speed, max_avg_speed),
+            "elevation_meters": (min_elevation_meters, max_elevation_meters),
+        })
+
+        if title_contains:
+            stmt = stmt.where(Activity.title.ilike(f"%{title_contains}%"))
 
         result = await db.execute(stmt)
         activities = result.scalars().all()
         data = [_activity_to_dict(a) for a in activities]
 
         logger.info(
-            "Tool get_activities: user=%s date_from=%s date_to=%s sport=%s → %d записей",
-            user_id, date_from, date_to, sport_type, len(data),
+            "Tool get_activities: user=%s date_from=%s date_to=%s sport=%s "
+            "filters=%d → %d записей",
+            user_id, date_from, date_to, sport_type,
+            sum(
+                1 for v in (
+                    sport_types, min_distance_meters, max_distance_meters,
+                    min_duration_seconds, max_duration_seconds,
+                    min_calories, max_calories,
+                    min_avg_heart_rate, max_avg_heart_rate,
+                    min_avg_speed, max_avg_speed,
+                    min_elevation_meters, max_elevation_meters,
+                    title_contains,
+                ) if v is not None
+            ),
+            len(data),
         )
         return ToolResult(tool_name="get_activities", success=True, data=data, error=None)
     except Exception as exc:
@@ -231,15 +299,33 @@ async def get_daily_facts(
     date_from: date,
     date_to: date,
     metrics: list[str] | None = None,
+    min_steps: int | None = None,
+    max_steps: int | None = None,
+    min_calories_kcal: int | None = None,
+    max_calories_kcal: int | None = None,
+    min_recovery_score: int | None = None,
+    max_recovery_score: int | None = None,
+    min_hrv_rmssd_milli: float | None = None,
+    max_hrv_rmssd_milli: float | None = None,
+    min_resting_heart_rate: int | None = None,
+    max_resting_heart_rate: int | None = None,
+    min_sleep_total_in_bed_milli: int | None = None,
+    max_sleep_total_in_bed_milli: int | None = None,
+    min_water_liters: float | None = None,
+    max_water_liters: float | None = None,
+    min_spo2_percentage: float | None = None,
+    max_spo2_percentage: float | None = None,
 ) -> ToolResult:
-    """Получить дневные метрики здоровья за период.
+    """Получить дневные метрики здоровья за период с whitelisted-фильтрами.
 
     Args:
         db: Асинхронная сессия SQLAlchemy.
         user_id: Идентификатор пользователя.
         date_from: Начало периода (включительно).
         date_to: Конец периода (включительно).
-        metrics: Список полей для фильтрации (если None — все поля).
+        metrics: Список полей для проекции (если None — все поля).
+        min_*/max_* — диапазоны по числовым полям DailyFact. None-границы
+            пропускаются. Сон передаётся в миллисекундах (как в БД).
 
     Returns:
         ToolResult с list[dict] дневных фактов.
@@ -254,6 +340,19 @@ async def get_daily_facts(
             )
             .order_by(DailyFact.iso_date.asc())
         )
+
+        stmt = _apply_range_filters(stmt, DailyFact, {
+            "steps": (min_steps, max_steps),
+            "calories_kcal": (min_calories_kcal, max_calories_kcal),
+            "recovery_score": (min_recovery_score, max_recovery_score),
+            "hrv_rmssd_milli": (min_hrv_rmssd_milli, max_hrv_rmssd_milli),
+            "resting_heart_rate": (min_resting_heart_rate, max_resting_heart_rate),
+            "sleep_total_in_bed_milli": (
+                min_sleep_total_in_bed_milli, max_sleep_total_in_bed_milli,
+            ),
+            "water_liters": (min_water_liters, max_water_liters),
+            "spo2_percentage": (min_spo2_percentage, max_spo2_percentage),
+        })
 
         result = await db.execute(stmt)
         facts = result.scalars().all()

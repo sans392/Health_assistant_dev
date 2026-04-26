@@ -455,6 +455,137 @@ class TestPlannerPlanMethod:
         # Финальный ответ планера (на второй итерации) успешно получен.
         assert result.error is None
 
+    async def test_execute_tool_passes_sport_type_from_planner_args(self) -> None:
+        """Регрессия: planner присылает sport_type в args — он должен дойти до tool.
+
+        До правки `_execute_tool` ловил только date_from/to и роняла фильтры.
+        """
+        agent = PlannerAgent()
+        captured: dict = {}
+
+        async def fake_get_activities(**kwargs):
+            captured.update(kwargs)
+            from app.tools.db_tools import ToolResult
+            return ToolResult(
+                tool_name="get_activities", success=True, data=[], error=None,
+            )
+
+        with patch("app.pipeline.planner.get_activities", new=fake_get_activities):
+            await agent._execute_tool(
+                tool_name="get_activities",
+                args={
+                    "date_from": "2026-04-19",
+                    "date_to": "2026-04-25",
+                    "sport_type": "running",
+                    "min_distance_meters": 8000,
+                },
+                user_id="u1",
+                query="покажи длинные пробежки",
+                sport_type=None,
+                db=_make_db(),
+            )
+
+        assert captured["sport_type"] == "running"
+        assert captured["min_distance_meters"] == 8000
+        assert captured["date_from"] == date(2026, 4, 19)
+        assert captured["date_to"] == date(2026, 4, 25)
+
+    async def test_execute_tool_falls_back_to_intent_sport_type(self) -> None:
+        """Если planner не передал sport_type — берём из intent (sticky)."""
+        agent = PlannerAgent()
+        captured: dict = {}
+
+        async def fake_get_activities(**kwargs):
+            captured.update(kwargs)
+            from app.tools.db_tools import ToolResult
+            return ToolResult(
+                tool_name="get_activities", success=True, data=[], error=None,
+            )
+
+        with patch("app.pipeline.planner.get_activities", new=fake_get_activities):
+            await agent._execute_tool(
+                tool_name="get_activities",
+                args={"date_from": "2026-04-19", "date_to": "2026-04-25"},
+                user_id="u1", query="покажи пробежки",
+                sport_type="running",
+                db=_make_db(),
+            )
+
+        assert captured["sport_type"] == "running"
+
+    async def test_execute_tool_planner_sport_type_overrides_intent(self) -> None:
+        """Если planner явно передал sport_type — он приоритетнее intent."""
+        agent = PlannerAgent()
+        captured: dict = {}
+
+        async def fake_get_activities(**kwargs):
+            captured.update(kwargs)
+            from app.tools.db_tools import ToolResult
+            return ToolResult(
+                tool_name="get_activities", success=True, data=[], error=None,
+            )
+
+        with patch("app.pipeline.planner.get_activities", new=fake_get_activities):
+            await agent._execute_tool(
+                tool_name="get_activities",
+                args={
+                    "date_from": "2026-04-19", "date_to": "2026-04-25",
+                    "sport_type": "cycling",
+                },
+                user_id="u1", query="вело",
+                sport_type="running",  # intent sticky
+                db=_make_db(),
+            )
+
+        assert captured["sport_type"] == "cycling"
+
+    async def test_execute_tool_get_daily_facts_passes_filters(self) -> None:
+        agent = PlannerAgent()
+        captured: dict = {}
+
+        async def fake_get_daily_facts(**kwargs):
+            captured.update(kwargs)
+            from app.tools.db_tools import ToolResult
+            return ToolResult(
+                tool_name="get_daily_facts", success=True, data=[], error=None,
+            )
+
+        with patch("app.pipeline.planner.get_daily_facts", new=fake_get_daily_facts):
+            await agent._execute_tool(
+                tool_name="get_daily_facts",
+                args={
+                    "date_from": "2026-04-19", "date_to": "2026-04-25",
+                    "min_steps": 10000, "max_recovery_score": 90,
+                },
+                user_id="u1", query="дни с 10к шагов",
+                sport_type=None,
+                db=_make_db(),
+            )
+
+        assert captured["min_steps"] == 10000
+        assert captured["max_recovery_score"] == 90
+
+    async def test_execute_tool_invalid_args_returns_none(self) -> None:
+        """Невалидные args (например, недопустимый sport_type) → None + WARN."""
+        agent = PlannerAgent()
+
+        with patch(
+            "app.pipeline.planner.get_activities",
+            new=AsyncMock(),
+        ) as mock_call:
+            data = await agent._execute_tool(
+                tool_name="get_activities",
+                args={
+                    "date_from": "2026-04-19", "date_to": "2026-04-25",
+                    "sport_type": "квиддич",
+                },
+                user_id="u1", query="?", sport_type=None,
+                db=_make_db(),
+            )
+
+        assert data is None
+        mock_call.assert_not_called()
+
     async def test_plan_timeout_sets_flag(self) -> None:
         agent = PlannerAgent()
         agent._timeout = 0.0001  # Ультра-малый таймаут

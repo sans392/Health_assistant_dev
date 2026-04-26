@@ -23,12 +23,19 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pydantic import ValidationError
+
 from app.pipeline.tool_result_compressor import compress_for_planner
 from app.services.llm_registry import llm_registry
 from app.services.tool_call_logger import tool_call_logger
 from app.tools.db_tools import get_activities, get_daily_facts, get_user_profile
 from app.tools.rag_retrieve import rag_retrieve
-from app.tools.schemas import tool_to_prompt_signature
+from app.tools.schemas import (
+    GetActivitiesArgs,
+    GetDailyFactsArgs,
+    tool_to_prompt_signature,
+    validate_tool_args,
+)
 from app.tools.time_utils import current_datetime_str
 
 logger = logging.getLogger(__name__)
@@ -80,6 +87,14 @@ def _build_tools_description() -> str:
     lines.append(
         "Примеры: точечный день — date_from=date_to=YYYY-MM-DD; "
         "интервал — задавай оба конца явно."
+    )
+    lines.append(
+        "У get_activities / get_daily_facts есть whitelisted-фильтры по полям "
+        "(min_/max_distance_meters, min_/max_duration_seconds, min_/max_calories, "
+        "min_/max_avg_heart_rate, min_/max_steps, min_/max_recovery_score, "
+        "min_/max_hrv_rmssd_milli, ...). Используй их, чтобы сразу сузить "
+        "выборку под запрос — например, «длинные пробежки» → "
+        "sport_type=running + min_distance_meters=10000."
     )
     lines.append("")
     lines.append(
@@ -455,6 +470,99 @@ class PlannerAgent:
         return merged
 
     @staticmethod
+    def _validate_db_args(
+        tool_name: str,
+        planner_args: dict,
+        user_id: str,
+        date_from: date,
+        date_to: date,
+        sport_type: str | None,
+    ) -> dict | None:
+        """Собрать kwargs для get_activities / get_daily_facts из planner-args.
+
+        Игнорирует поля даты/days в planner_args (обработаны выше через
+        _resolve_date_window) и неизвестные поля (Pydantic с extra='forbid'
+        упадёт). Возвращает kwargs, готовый для распаковки в tool, либо None
+        при ошибке валидации (с логом).
+
+        sport_type из intent (sticky-контекст) применяется только если
+        planner явно его не передал — иначе приоритет за planner-args.
+        """
+        # Поля, относящиеся к дате — уже обработаны _resolve_date_window.
+        # tool/user_id планер не передаёт; всё что планер прислал не из
+        # whitelisted-схемы — отфильтрует Pydantic с extra='forbid'.
+        date_keys = {"date_from", "date_to", "days"}
+        raw: dict[str, Any] = {
+            k: v for k, v in (planner_args or {}).items()
+            if k not in date_keys and v is not None and v != ""
+        }
+        raw["user_id"] = user_id
+        raw["date_from"] = date_from
+        raw["date_to"] = date_to
+        if tool_name == "get_activities" and sport_type and "sport_type" not in raw:
+            raw["sport_type"] = sport_type
+
+        try:
+            args_model = validate_tool_args(tool_name, raw)
+        except ValidationError as exc:
+            first = exc.errors()[0] if exc.errors() else {}
+            msg = f"{first.get('loc', ('?',))[-1]}: {first.get('msg', str(exc))}"
+            logger.warning(
+                "PlannerAgent: args для %s не прошли валидацию: %s | raw=%r",
+                tool_name, msg, raw,
+            )
+            return None
+
+        # model_dump убирает None'ы и разворачивает enum'ы в их str-значения
+        # (use_enum_values нет — но get_activities/get_daily_facts принимают
+        # str, поэтому конвертируем явно).
+        kwargs: dict[str, Any] = {}
+        if isinstance(args_model, GetActivitiesArgs):
+            kwargs["user_id"] = args_model.user_id
+            kwargs["date_from"] = args_model.date_from
+            kwargs["date_to"] = args_model.date_to
+            if args_model.sport_type is not None:
+                kwargs["sport_type"] = args_model.sport_type.value
+            if args_model.sport_types:
+                kwargs["sport_types"] = [s.value for s in args_model.sport_types]
+            for f in (
+                "min_distance_meters", "max_distance_meters",
+                "min_duration_seconds", "max_duration_seconds",
+                "min_calories", "max_calories",
+                "min_avg_heart_rate", "max_avg_heart_rate",
+                "min_avg_speed", "max_avg_speed",
+                "min_elevation_meters", "max_elevation_meters",
+                "title_contains",
+            ):
+                v = getattr(args_model, f)
+                if v is not None:
+                    kwargs[f] = v
+            return kwargs
+
+        if isinstance(args_model, GetDailyFactsArgs):
+            kwargs["user_id"] = args_model.user_id
+            kwargs["date_from"] = args_model.date_from
+            kwargs["date_to"] = args_model.date_to
+            if args_model.metrics:
+                kwargs["metrics"] = [m.value for m in args_model.metrics]
+            for f in (
+                "min_steps", "max_steps",
+                "min_calories_kcal", "max_calories_kcal",
+                "min_recovery_score", "max_recovery_score",
+                "min_hrv_rmssd_milli", "max_hrv_rmssd_milli",
+                "min_resting_heart_rate", "max_resting_heart_rate",
+                "min_sleep_total_in_bed_milli", "max_sleep_total_in_bed_milli",
+                "min_water_liters", "max_water_liters",
+                "min_spo2_percentage", "max_spo2_percentage",
+            ):
+                v = getattr(args_model, f)
+                if v is not None:
+                    kwargs[f] = v
+            return kwargs
+
+        return None
+
+    @staticmethod
     def _resolve_date_window(args: dict, today: date) -> tuple[date, date]:
         """Вытащить date_from / date_to из args планировщика.
 
@@ -509,11 +617,31 @@ class PlannerAgent:
             return res.data
 
         if tool_name == "get_activities":
-            res = await get_activities(db=db, user_id=user_id, date_from=date_from, date_to=date_to)
+            kwargs = self._validate_db_args(
+                tool_name="get_activities",
+                planner_args=args,
+                user_id=user_id,
+                date_from=date_from,
+                date_to=date_to,
+                sport_type=sport_type,
+            )
+            if kwargs is None:
+                return None
+            res = await get_activities(db=db, **kwargs)
             return res.data
 
         if tool_name == "get_daily_facts":
-            res = await get_daily_facts(db=db, user_id=user_id, date_from=date_from, date_to=date_to)
+            kwargs = self._validate_db_args(
+                tool_name="get_daily_facts",
+                planner_args=args,
+                user_id=user_id,
+                date_from=date_from,
+                date_to=date_to,
+                sport_type=None,
+            )
+            if kwargs is None:
+                return None
+            res = await get_daily_facts(db=db, **kwargs)
             return res.data
 
         if tool_name == "compute_recovery":

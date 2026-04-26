@@ -154,11 +154,52 @@ class GetActivitiesArgs(ToolArgsBase):
     date_from: date
     date_to: date
     sport_type: SportTypeEnum | None = None
+    # Несколько видов одновременно («бег или вело»). Если задан вместе со
+    # sport_type — оба фильтра применяются (логическое AND), повторять
+    # значение не обязательно.
+    sport_types: list[SportTypeEnum] | None = None
+
+    # Whitelisted-фильтры по числовым полям Activity. Каждое поле опционально;
+    # при None фильтр пропускается. Технические поля (id, user_id, source,
+    # is_primary, anomaly_flags, raw_title, start_time, end_time) фильтрации
+    # не подлежат: окно дат уже задано через date_from/date_to.
+    min_distance_meters: float | None = Field(default=None, ge=0)
+    max_distance_meters: float | None = Field(default=None, ge=0)
+    min_duration_seconds: int | None = Field(default=None, ge=0)
+    max_duration_seconds: int | None = Field(default=None, ge=0)
+    min_calories: int | None = Field(default=None, ge=0)
+    max_calories: int | None = Field(default=None, ge=0)
+    min_avg_heart_rate: int | None = Field(default=None, ge=0)
+    max_avg_heart_rate: int | None = Field(default=None, ge=0)
+    min_avg_speed: float | None = Field(default=None, ge=0)
+    max_avg_speed: float | None = Field(default=None, ge=0)
+    min_elevation_meters: float | None = Field(default=None, ge=0)
+    max_elevation_meters: float | None = Field(default=None, ge=0)
+    # Подстрока в title (case-insensitive). Полезно для запросов вида
+    # «покажи интервалки» / «long run».
+    title_contains: str | None = Field(default=None, min_length=1, max_length=100)
 
     @model_validator(mode="after")
     def _check_dates(self) -> "GetActivitiesArgs":
         if self.date_from > self.date_to:
             raise ValueError("date_from must be <= date_to")
+        return self
+
+    @model_validator(mode="after")
+    def _check_ranges(self) -> "GetActivitiesArgs":
+        # Перевёрнутый диапазон ловим явно — иначе запрос молча вернёт пусто.
+        for low, high in (
+            ("min_distance_meters", "max_distance_meters"),
+            ("min_duration_seconds", "max_duration_seconds"),
+            ("min_calories", "max_calories"),
+            ("min_avg_heart_rate", "max_avg_heart_rate"),
+            ("min_avg_speed", "max_avg_speed"),
+            ("min_elevation_meters", "max_elevation_meters"),
+        ):
+            lo = getattr(self, low)
+            hi = getattr(self, high)
+            if lo is not None and hi is not None and lo > hi:
+                raise ValueError(f"{low} ({lo}) must be <= {high} ({hi})")
         return self
 
 
@@ -175,10 +216,49 @@ class GetDailyFactsArgs(ToolArgsBase):
     date_to: date
     metrics: list[MetricEnum] | None = None
 
+    # Whitelisted-фильтры по числовым полям DailyFact. Технические поля
+    # (id, user_id, iso_date, sources_json, anomaly_flags) не фильтруются.
+    # Сон передаётся в миллисекундах — как лежит в БД; конвертацию делаем
+    # в формирующем слое (промпт планировщика).
+    min_steps: int | None = Field(default=None, ge=0)
+    max_steps: int | None = Field(default=None, ge=0)
+    min_calories_kcal: int | None = Field(default=None, ge=0)
+    max_calories_kcal: int | None = Field(default=None, ge=0)
+    min_recovery_score: int | None = Field(default=None, ge=0, le=100)
+    max_recovery_score: int | None = Field(default=None, ge=0, le=100)
+    min_hrv_rmssd_milli: float | None = Field(default=None, ge=0)
+    max_hrv_rmssd_milli: float | None = Field(default=None, ge=0)
+    min_resting_heart_rate: int | None = Field(default=None, ge=0)
+    max_resting_heart_rate: int | None = Field(default=None, ge=0)
+    min_sleep_total_in_bed_milli: int | None = Field(default=None, ge=0)
+    max_sleep_total_in_bed_milli: int | None = Field(default=None, ge=0)
+    min_water_liters: float | None = Field(default=None, ge=0)
+    max_water_liters: float | None = Field(default=None, ge=0)
+    min_spo2_percentage: float | None = Field(default=None, ge=0, le=100)
+    max_spo2_percentage: float | None = Field(default=None, ge=0, le=100)
+
     @model_validator(mode="after")
     def _check_dates(self) -> "GetDailyFactsArgs":
         if self.date_from > self.date_to:
             raise ValueError("date_from must be <= date_to")
+        return self
+
+    @model_validator(mode="after")
+    def _check_ranges(self) -> "GetDailyFactsArgs":
+        for low, high in (
+            ("min_steps", "max_steps"),
+            ("min_calories_kcal", "max_calories_kcal"),
+            ("min_recovery_score", "max_recovery_score"),
+            ("min_hrv_rmssd_milli", "max_hrv_rmssd_milli"),
+            ("min_resting_heart_rate", "max_resting_heart_rate"),
+            ("min_sleep_total_in_bed_milli", "max_sleep_total_in_bed_milli"),
+            ("min_water_liters", "max_water_liters"),
+            ("min_spo2_percentage", "max_spo2_percentage"),
+        ):
+            lo = getattr(self, low)
+            hi = getattr(self, high)
+            if lo is not None and hi is not None and lo > hi:
+                raise ValueError(f"{low} ({lo}) must be <= {high} ({hi})")
         return self
 
 

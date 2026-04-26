@@ -107,6 +107,50 @@ class TestGetActivitiesArgs:
                 date_to=date(2026, 4, 7),
             )
 
+    def test_range_filters_accepted(self) -> None:
+        args = GetActivitiesArgs(
+            user_id="u1",
+            date_from=date(2026, 4, 1),
+            date_to=date(2026, 4, 7),
+            min_distance_meters=5000,
+            max_distance_meters=20000,
+            min_duration_seconds=600,
+            min_avg_heart_rate=130,
+            max_avg_heart_rate=170,
+            title_contains="long",
+        )
+        assert args.min_distance_meters == 5000
+        assert args.max_distance_meters == 20000
+        assert args.title_contains == "long"
+
+    def test_inverted_range_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            GetActivitiesArgs(
+                user_id="u1",
+                date_from=date(2026, 4, 1),
+                date_to=date(2026, 4, 7),
+                min_distance_meters=20000,
+                max_distance_meters=5000,
+            )
+
+    def test_negative_filter_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            GetActivitiesArgs(
+                user_id="u1",
+                date_from=date(2026, 4, 1),
+                date_to=date(2026, 4, 7),
+                min_calories=-10,
+            )
+
+    def test_sport_types_list_accepted(self) -> None:
+        args = GetActivitiesArgs(
+            user_id="u1",
+            date_from=date(2026, 4, 1),
+            date_to=date(2026, 4, 7),
+            sport_types=["running", "cycling"],
+        )
+        assert [s.value for s in args.sport_types] == ["running", "cycling"]
+
 
 class TestGetActivitiesBySportArgs:
     def test_days_bounds(self) -> None:
@@ -139,6 +183,37 @@ class TestGetDailyFactsArgs:
                 date_from=date(2026, 4, 1),
                 date_to=date(2026, 4, 7),
                 metrics=["unknown_metric"],
+            )
+
+    def test_range_filters_accepted(self) -> None:
+        args = GetDailyFactsArgs(
+            user_id="u1",
+            date_from=date(2026, 4, 1),
+            date_to=date(2026, 4, 7),
+            min_steps=8000,
+            max_steps=15000,
+            min_recovery_score=60,
+        )
+        assert args.min_steps == 8000
+        assert args.min_recovery_score == 60
+
+    def test_recovery_score_clamp_rejects_over_100(self) -> None:
+        with pytest.raises(ValidationError):
+            GetDailyFactsArgs(
+                user_id="u1",
+                date_from=date(2026, 4, 1),
+                date_to=date(2026, 4, 7),
+                max_recovery_score=200,
+            )
+
+    def test_inverted_range_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            GetDailyFactsArgs(
+                user_id="u1",
+                date_from=date(2026, 4, 1),
+                date_to=date(2026, 4, 7),
+                min_steps=20000,
+                max_steps=5000,
             )
 
 
