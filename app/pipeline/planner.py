@@ -30,12 +30,13 @@ from app.services.llm_registry import llm_registry
 from app.services.tool_call_logger import tool_call_logger
 from app.tools.db_tools import get_activities, get_daily_facts, get_user_profile
 from app.tools.rag_retrieve import rag_retrieve
+from app.tools.registry import ToolSpec, tool_registry
 from app.tools.schemas import (
     GetActivitiesArgs,
     GetDailyFactsArgs,
-    tool_to_prompt_signature,
     validate_tool_args,
 )
+from app.tools.selector import ToolSelector, tool_selector
 from app.tools.time_utils import current_datetime_str
 
 logger = logging.getLogger(__name__)
@@ -58,27 +59,18 @@ def _parse_iso_date(value: Any) -> date | None:
     except ValueError:
         return None
 
-# Описания tools — компактные, человеческие. Сигнатуры подставляются автоматически
-# из Pydantic-схем (см. tool_to_prompt_signature), чтобы они не разъезжались с
-# реальным контрактом ToolExecutor'а.
-_TOOL_DESCRIPTIONS: list[tuple[str, str]] = [
-    ("get_activities", "тренировки пользователя за интервал дат"),
-    ("get_daily_facts", "дневные метрики здоровья (HRV, ЧСС, сон, шаги) за интервал дат"),
-    ("get_user_profile", "профиль пользователя"),
-    ("compute_recovery", "recovery score за окно window_days"),
-    ("check_overtraining", "признаки перетренированности за окно window_days"),
-    (
-        "rag_retrieve",
-        "знания из базы. Категории: physiology_norms | training_principles | "
-        "recovery_science | sport_specific | nutrition_basics",
-    ),
-]
+# Tool descriptions live in `app/tools/registry.py` — single source of truth
+# also used by the (future) OpenAI-native tools path. The selector lets us
+# trim this set per-query later; today the default `AllToolsSelector` keeps
+# the full list, which preserves legacy planner behaviour.
 
 
-def _build_tools_description() -> str:
+def _build_tools_description(specs: list[ToolSpec] | None = None) -> str:
+    if specs is None:
+        specs = tool_registry.all()
     lines = []
-    for name, desc in _TOOL_DESCRIPTIONS:
-        lines.append(f"- {tool_to_prompt_signature(name)}: {desc}")
+    for spec in specs:
+        lines.append(f"- {spec.signature()}: {spec.description}")
     lines.append("")
     lines.append(
         "Аргументы date_from / date_to передавай в формате YYYY-MM-DD. "
@@ -114,6 +106,8 @@ def _build_tools_description() -> str:
     return "\n".join(lines)
 
 
+# Module-level constant kept for legacy callers (admin diagnostics, tests):
+# what the planner *would* see for the full toolset.
 _TOOLS_DESCRIPTION = _build_tools_description()
 
 _SYSTEM_PROMPT_TEMPLATE = """\
@@ -168,10 +162,13 @@ class PlannerAgent:
     исполняет tool-calls, накапливает контекст до final_answer.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, selector: ToolSelector | None = None) -> None:
         self._max_iterations = _MAX_ITERATIONS
         self._max_tool_calls_per_iter = _MAX_TOOL_CALLS_PER_ITER
         self._timeout = _TIMEOUT_TOTAL
+        # Selector is injectable for future per-request narrowing; default
+        # passthrough keeps current behaviour byte-identical.
+        self._selector = selector or tool_selector
 
     async def plan(
         self,
@@ -200,8 +197,11 @@ class PlannerAgent:
         llm_client = llm_registry.get_client("planner")
         sport_type: str | None = entities.get("sport_type")
 
+        selected_specs = self._selector.select(query)
+        tools_description = _build_tools_description(selected_specs)
+
         system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(
-            tools=_TOOLS_DESCRIPTION,
+            tools=tools_description,
             user_context=user_context,
             current_datetime=current_datetime_str(),
             max_tool_calls=self._max_tool_calls_per_iter,
